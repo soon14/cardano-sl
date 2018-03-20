@@ -1209,6 +1209,8 @@ new transactions.
 
 \todo[inline]{Make this more formal.}
 
+\todo[inline]{Mention value at risk.}
+
 Of course, if the wallet's owner can submit further transactions, then the
 minimum balance of the wallet is simply zero (the owner spends all their
 funds). For somewhat similar reasons, the wallet's \emph{maximum} balance
@@ -1256,12 +1258,26 @@ If these expected and pending transactions would all be independent, the
 minimum balance of the wallet would simply be given by assuming that none of
 the expected transactions get confirmed and all of the pending ones do.
 Unfortunately, there can (and will) be dependencies between these two sets
-in both directions.
+in both directions. Figure~\ref{fig:trans_deps} shows some of the possible
+dependency graphs that may arise.
 
-Observations:
+\begin{definition}[Self consistency]
+A subset $S \subseteq \mathit{pending}$ is \emph{self-consistent} iff
+%
+\begin{equation*}
+\forall (\mathit{inputs}, \mathit{outputs}) \in S \cdot
+\forall (\mathit{txid}, \mathit{ix}) \in \mathit{inputs} \cdot
+\text{if } \exists t \in \mathit{pending} \cdot \mathsf{txid} ~ t = \mathit{txid}
+\text{ then } t \in S
+\end{equation*}
+\end{definition}
 
-\begin{itemize}
-\item Consider a pending transaction $t$ (i.e., a transaction that decreases
+The minimum balance is the minimum across all self-consistent sets.
+
+\todo[inline]{We cannot compute this, since we don't have the expected
+transactions.}
+
+Consider a pending transaction $t$ (i.e., a transaction that decreases
 the wallet's balance). Provided that all of $t$'s dependencies are included,
 then we should \emph{always} include $t$: if nothing depends on $t$, then
 including $t$ will obviously decrease the wallet's balance; if there are
@@ -1269,15 +1285,15 @@ other transactions that depend on $t$, then \emph{not} including $t$ will
 mean we get no choice in including those other transactions or not, but
 if we do include it, it doesn't force our hand either way for those
 other transactions.
-\end{itemize}
 
 
+\newcommand{\Y}[1]{#1}
+\newcommand{\N}[1]{\overline{#1}}
 
 
 \begin{figure}[p]
 
-\newcommand{\Y}[1]{#1}
-\newcommand{\N}[1]{\overline{#1}}
+\small
 
 \begin{tabular}{lll}
 %%%
@@ -1298,7 +1314,7 @@ include if $c_1 \le 0$
 \\
 %%%
 \\
-\multicolumn{3}{l}{\emph{One transaction dependent on one other}} \\
+\multicolumn{3}{l}{\emph{One transaction dependent on one other} (picking assuming $c_1 \le 0$)} \\
 \begin{forest}
 [$(t_1: c_1)$, baseline [$(t_2: c_2)$]]
 \end{forest}
@@ -1320,11 +1336,49 @@ c_2 &                    & \text{pick}        \\ \hline
     & \textit{otherwise} & \N{t_1} \, \N{t_2} \\
 \end{array}
 \end{math} \\
-&& $t_1$ never included if $c_1 > 0$ \\
 \\
 %%%
 \\
-\multicolumn{3}{l}{\emph{One transaction dependent on two others}} \\
+\multicolumn{3}{l}{\emph{Linear chain} (picking assuming $c_1 \le 0$)} \\
+\begin{forest}
+[$(t_1: c_1)$
+  [$(t_2: c_2)$, baseline
+    [$(t_3: c_3)$]
+  ]
+]
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+0               & \N{t_1} \, \N{t_2} \, \N{t_3} \\
+c_3             & \N{t_1} \, \N{t_2} \, \Y{t_3} \\
+c_3 + c_2       & \N{t_1} \, \Y{t_2} \, \Y{t_3} \\
+c_3 + c_2 + c_1 & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
+\end{cases}
+\end{math}
+&
+\begin{math}
+\begin{array}{lll|l}
+c_2 & c_3 &                         & \text{pick}             \\ \hline
+< 0 & < 0 &                         & \Y{t_1} \Y{t_2} \Y{t_3} \\
+< 0 & > 0 & (c_1 + c_2) + c_3 \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
+> 0 & < 0 & c_1 + c_2 \le 0         & \Y{t_1} \Y{t_2} \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \Y{t_3} \\
+> 0 & > 0 & c_1 + (c_2 + c_3) \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
+\end{array}
+\end{math}
+\\
+% \end{tabular}
+% \end{figure}
+%
+% \begin{figure}[p]
+% \begin{tabular}{lll}
+%%%
+\\
+\multicolumn{3}{l}{\emph{One transaction dependent on two others} (picking assuming $c_1 \le 0$)} \\
 \begin{forest}
 [$(t_1: c_1)$ [$(t_2: c_2)$] [$(t_3: c_3)$]]
 \end{forest}
@@ -1353,11 +1407,9 @@ c_2 & c_3 &                         & \text{pick} \\ \hline
 \end{array}
 \end{math}
 \\
-&& (if $c_1 > 0$ reduces to two independent transactions.)
-\\
 %%%
 \\
-\multicolumn{3}{l}{\emph{Two transactions depending on a single other}} \\
+\multicolumn{3}{l}{\emph{Two transactions depending on a single other} (picking assuming $c_1 \le 0, c_2 \le 0$)} \\
 \begin{forest}
   [,phantom
   [$(t_1: c_1)$ [$(t_3: c_3)$, name=t3]]
@@ -1384,14 +1436,12 @@ c_3 &                         & \text{pick}             \\ \hline
     & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
 \end{array}
 \end{math} \\
-&& $t_1$ never included if $c_1 > 0$; similarly for $t_2$
-\\
 %%%
 \\
 \multicolumn{3}{l}{\emph{Common ancestor}} \\
 \begin{forest}
 [$(t_1: c_1)$
-  [$(t_2: c_2)$, baseline [$(t_4: c_4)$, name=t4]]
+  [$(t_2: c_2)$, baseline [,phantom] [$(t_4: c_4)$, name=t4]]
   [$(t_3: c_3)$] {\draw () to (t4);}
 ]
 \end{forest}
@@ -1407,14 +1457,30 @@ c_4 + c_3 + c_2       & \N{t_1} \Y{t_2} \Y{t_3} \Y{t_4} \\
 c_4 + c_3 + c_2 + c_1 & \Y{t_1} \Y{t_2} \Y{t_3} \Y{t_4}
 \end{cases}
 \end{math}
+\\
+%%%
+\\
+\multicolumn{3}{l}{\emph{Direct and indirect dependency}} \\
+\begin{forest}
+[$(t_1: c_1)$
+  [$(t_2: c_2)$, baseline [,phantom] [$(t_3: c_3)$, name=t3]]
+  [,phantom]
+] {\draw () to[out=south east, in=north east] (t3);}
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+ & \N{t_1} \N{t_2} \N{t_3} \\
+ & \N{t_1} \N{t_2} \Y{t_3} \\
+ & \N{t_1} \Y{t_2} \Y{t_3} \\
+ & \Y{t_1} \Y{t_2} \Y{t_3} \\
+\end{cases}
+\end{math}
+
+\caption{\label{fig:trans_deps}Some possible dependency graphs between transactions}
+
 \end{tabular}
-
-
-
-
-
-
-
 \end{figure}
 
 \clearpage
