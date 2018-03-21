@@ -413,11 +413,14 @@ other operators.
 \subsection{Invariants}
 \label{sec:invariants}
 
-We would hope to prove the following invariants are true for all wallet values
+We would hope to prove the following invariants are true for all wallet values.
 
-\begin{equation} \label{txins_in_dom_utxo}
+\begin{invariant}
+\begin{equation*}
 \mathsf{txins} ~ pending \subseteq \dom utxo
-\end{equation}
+\end{equation*}
+\label{inv:txins_in_dom_utxo}
+\end{invariant}
 
 Note that this is only true if we do not allow dependent in-flight transactions.
 If we do allow dependent ones then the spent set of the pending includes change
@@ -426,20 +429,29 @@ addresses that are not yet in the wallet UTxO.
 Note that we may need to revisit this invariant in the light of rollbacks,
 because that reverts the UTxO but the set of pending transactions is not.
 
-\begin{equation}
+\begin{invariant}
+\begin{equation*}
 \range utxo \subseteq \mathsf{TxOut_{ours}}
-\end{equation}
+\end{equation*}
+\label{inv:utxo_is_ours}
+\end{invariant}
 
 This just says that our wallet UTxO only covers addresses that belong to us,
 without covering anyone else's addresses.
 
-\begin{equation} \label{change_vs_available}
+\begin{invariant}
+\begin{equation*}
 \dom (\mathsf{change} ~ w) \cap \dom (\mathsf{available} ~ w) = \emptyset
-\end{equation}
+\end{equation*}
+\label{inv:change_vs_available}
+\end{invariant}
 
-\begin{equation} \label{change_vs_utxo}
+\begin{invariant}
+\begin{equation*}
 \dom (\mathsf{change} ~ w) \cap \dom utxo = \emptyset
-\end{equation}
+\end{equation*}
+\label{inv:change_vs_utxo}
+\end{invariant}
 
 This is not very deep. All new transactions should have fresh ids, and thus
 not be in the existing wallet UTxO. The first one reminds us that once
@@ -447,16 +459,24 @@ transactions make it into the UTxO, they have been removed from the pending set.
 
 And some high level properties corresponding to our intuition, for a wallet $w$:
 
-\begin{equation}
-\begin{split}
-\mathsf{change} ~ w \cup \mathsf{available} ~ w &= \mathsf{total} ~ w \\
-\mathsf{balance} ~ (\mathsf{change} ~ w) + \mathsf{balance} ~ (\mathsf{available} ~ w) &= \mathsf{balance} ~ (\mathsf{total} ~ w)
-\end{split}
-\end{equation}
+\begin{invariant}
+\begin{equation*}
+\mathsf{change} ~ w \cup \mathsf{available} ~ w = \mathsf{total} ~ w
+\end{equation*}
+\label{inv:change_union_available}
+\end{invariant}
 
-Of course the first is actually a definition. The second follows from the
-first plus lemma \ref{lemma_balance_union} with invariant \ref{change_vs_available}
+\begin{invariant}
+\begin{equation*}
+\mathsf{balance} ~ (\mathsf{change} ~ w) + \mathsf{balance} ~ (\mathsf{available} ~ w) = \mathsf{balance} ~ (\mathsf{total} ~ w)
+\end{equation*}
+\label{inv:balance_change_available}
+\end{invariant}
 
+Of course Invariant~\ref{inv:change_union_available} follows immediately from
+the definition; Invariant~\ref{inv:balance_change_available} follows from
+Invariant~\ref{inv:change_union_available} and Lemma~\ref{lemma_balance_union}
+with Invariant~\ref{inv:change_vs_available}.
 
 \section{Efficiency considerations}
 
@@ -544,8 +564,8 @@ t & = \mathsf{balance} ~ (\mathsf{available} ~ (utxo, pending) \cup \mathsf{chan
 \end{equation*}
 
 We will use lemma \ref{lemma_balance_union}, about $\mathsf{balance}$
-distributing over $\cup$. The lemma's antecedent is satisfied by invariant
-\ref{change_vs_available}. So this gives us
+distributing over $\cup$. The lemma's antecedent is satisfied by
+Invariant~\ref{inv:change_vs_available}. So this gives us
 \begin{equation*}
 \begin{split}
 a & = \mathsf{balance} ~ (\mathsf{available} ~ (utxo, pending)) \\
@@ -784,8 +804,8 @@ $\mathit{tx}$; i.e., it is in $\mathit{utxo}^+$ rather than $\mathit{utxo}$.
 
 You might object that if the wallet isn't aware of transaction
 $\mathit{\mathit{txid}}$ yet then $\mathit{tx}$ cannot be in pending, and hence
-it should suffice to look at the $\mathit{utxo}$ only. Indeed, invariant
-\eqref{txins_in_dom_utxo} tells us that this must be so. In the presence of
+it should suffice to look at the $\mathit{utxo}$ only. Indeed,
+Invariant~\ref{inv:txins_in_dom_utxo} tells us that this must be so. In the presence of
 rollbacks (Section~\ref{sec:rollback}) this is unfortunately no longer the case,
 but the reasoning above continues to be true.
 
@@ -871,8 +891,7 @@ w_\emptyset & = [(\emptyset, \emptyset)]
 We cannot roll back a wallet that contains only a single checkpoint
 (this would anyway not make semantic sense).
 
-
-\begin{lemma}
+\begin{lemma} \label{lemma:rollback_applyBlock_id}
 \begin{equation*}
 \mathsf{rollback} \circ \mathsf{applyBlock} ~ b = \mathsf{id}
 \end{equation*}
@@ -930,10 +949,151 @@ Moreover, we have
 where the last line follows from Lemma~\ref{lemma:updatePending_is_filter} and
 associativity and commutativity of set union.
 
+\subsection{Expected UTxO}
+
+Consider the scenario where the wallet is informed of a new block, containing
+some transaction $t_1$ that transfers funds to the wallet. These funds are
+added to the wallet's UTxO, and hence the wallet may now create a pending
+transaction $t_2$ that depends on $t_1$ (spends one or more of $t_1$'s outputs).
+If we now roll back, we will have a pending transaction that depends on a
+transaction which has not yet been included in the blockchain. Let's call
+such a transaction ``expected''.
+
+The wallet may wish to keep track of such expected transactions (indeed, we
+might unify the concepts of pending and expected). Tracking expected
+transactions has some benefits. For instance, the wallet may in fact wish to
+\emph{resubmit} these (already signed) expected transactions to make sure that
+they make it into the fork (so as to not miss out on a large inbound payment).
+Consider however how much information the wallet would need to keep in order
+to make this possible. In the worst case, the inbound transaction may depend
+on the \emph{entire} blockchain up until this point, and that \emph{entire}
+blockchain might have been rolled back. This means that the wallet would have
+to keep track of the entire blockchain in its state, which is something we're
+trying to avoid. Even if we take into account the security parameter $k$, it
+would mean that in the worst case the wallet would have to keep track of the
+last $k$ blocks \emph{in their entirety} (as opposed to just the inputs from
+and outputs to addressed owned by the wallet). Indeed, as stated so far,
+the wallet does not keep track of transactions \emph{at all}, apart from the
+ones submitted by the wallet itself.
+
+Nonetheless, in order to be able to report a meaningful balance figure in
+the presence of rollbacks (more on that below), it \emph{is} useful to keep
+track of the ``expected UTxO''.
+
+\begin{align*}
+& w \in \mathsf{Wallet} = [\mathsf{Utxo} \times \mathsf{Pending} \times \mathsf{Utxo}] \\
+& \mathsf{applyBlock} ~ b ~ ((\mathit{utxo}, \mathit{pending}, \mathit{expected}) : \mathit{checkpoints}) = \\
+& \qquad ~ (\mathsf{updateUTxO} ~ b ~ \mathit{utxo}, \mathsf{updatePending} ~ b ~ \mathit{pending}, \mathsf{updateExpected} ~ b ~ \mathit{expected}) \\
+& \qquad : (\mathit{utxo}, \mathit{pending}, \mathit{expected}) : \mathit{checkpoints} \\
+& \mathsf{newPending} ~ \mathit{tx} ~ ((\mathit{utxo}, \mathit{pending}, \mathit{expected}) : \mathit{checkpoints}) = \\
+& \qquad (\mathit{utxo}, \mathit{pending} \cup \{\mathit{tx}\}, \mathit{expected}) : \mathit{checkpoints} \\
+& \mathsf{rollback} ~ ((\mathit{utxo}, \mathit{pending}, \mathit{expected}) : (\mathit{utxo}', \mathit{pending}', \mathit{expected}') : \mathit{checkpoints}) = \\
+& \qquad (\mathit{utxo}', \mathit{pending} \cup \mathit{pending}', \mathit{expected} \cup \mathit{expected}' \cup (\dom \mathit{utxo}' \subtractdom \mathit{utxo})) : \mathit{checkpoints} \\
+\end{align*}
+%
+where
+%
+\begin{equation*}
+\mathsf{updateExpected} ~ b ~ \mathit{expected} = \mathsf{txins} ~ b \subtractdom \mathit{expected}
+\end{equation*}
+%
+A trivial fact we need later is that
+%
+\begin{lemma} \label{lemma:updateExpected_is_filter}
+\begin{math}
+\mathsf{updateExpected} ~ b ~ \mathit{expected} \subseteq \mathit{expected}
+\end{math}
+\end{lemma}
+
+We should have the invariant that the expected UTxO and actual UTxO are always disjoint:
+
+\begin{invariant}
+For each checkpoint $(\mathit{utxo}, \mathit{pending}, \mathit{expected})$ in a wallet $w$,
+\begin{equation*}
+\dom \mathit{utxo} \cap \dom \mathit{expected} = \emptyset
+\end{equation*}
+\end{invariant}
+
+Like the actual UTxO, the expected UTxO belongs to the wallet
+
+\begin{invariant}
+For each checkpoint $(\mathit{utxo}, \mathit{pending}, \mathit{expected})$ in a wallet $w$,
+\begin{equation*}
+\range \mathit{expected} \subseteq \mathsf{TxOut}_\mathsf{ours}
+\end{equation*}
+\end{invariant}
+
+This is the equivalent of Invariant~\ref{inv:utxo_is_ours}, and follows
+straight-forwardly from it because $\mathit{expected}$ is derived from
+$\mathit{utxo}$.
+
+In the following we will find it helpful to compute the UTxO of a block:
+%
+\begin{definition}[Block UTxO]
+\begin{equation*}
+\mathsf{new} ~ b = \mathsf{txins} ~ b \subtractdom (\mathsf{txouts} ~ b \restrictrange \mathsf{TxOut_{ours}})
+\end{equation*}
+\end{definition}
+%
+We should then have that if we update the wallet's UTxO with a block, and then
+remove the existing unspent outputs, this should precisely be the UTxO of
+the block:
+%
+\begin{lemma} \label{lemma:update_remove_dom}
+\begin{math}
+\dom u \subtractdom \mathsf{updateUTxO} ~ b ~ u  = \mathsf{new} ~ b
+\end{math}
+\end{lemma}
+
+\begin{proof}
+\begin{align*}
+  & ~ \dom u \subtractdom \mathsf{updateUTxO} ~ b ~ u \\
+= & ~ \dom u \subtractdom \Bigl( \mathsf{txins} ~ b \subtractdom (u \cup (\mathsf{txouts} ~ b \restrictrange \mathsf{TxOut_{ours}})) \Bigr) \\
+= & ~ (\dom u \cup \mathsf{txins} ~ b) \subtractdom (u \cup (\mathsf{txouts} ~ b \restrictrange \mathsf{TxOut_{ours}})) \\
+= & ~ (\dom u \cup \mathsf{txins} ~ b) \subtractdom (\mathsf{txouts} ~ b \restrictrange \mathsf{TxOut_{ours}}) \\
+= & ~ \mathsf{txins} ~ b \subtractdom (\mathsf{txouts} ~ b \restrictrange \mathsf{TxOut_{ours}}) = \mathsf{new} ~ b \\
+\end{align*}
+where the last line is justified by the assumption that blocks only contain
+new transactions.
+\end{proof}
+
+When we roll back a block but remember the UTxO we used to have, we in a sense
+can anticipate what we think the future might look like.
+
+\begin{definition}[Anticipate a block]
+\begin{equation*}
+  \mathsf{anticipate} ~ b ~ ((\mathit{utxo}, \mathit{pending}, \mathit{expected}) : \mathit{checkpoints})
+= ((\mathit{utxo}, \mathit{pending}, \mathit{expected} \cup \mathsf{new} ~ b) : \mathit{checkpoints})
+\end{equation*}
+\end{definition}
+
+We can now formalize the above intuition, providing the moral equivalent
+of Lemma~\ref{lemma:rollback_applyBlock_id} in the last session, where we didn't
+track the expected UTxO yet.
+
+\begin{lemma}
+\begin{math}
+  \mathsf{rollback} \circ \mathsf{applyBlock} ~ b = \mathsf{anticipate} ~ b
+\end{math}
+\end{lemma}
+
+\begin{proof}
+\begin{align*}
+  & ~ \mathsf{rollback} ~ \Bigl( \mathsf{applyBlock} ~ b ~ ((u, p, e) : \mathit{cs}) \Bigr) \\
+= & ~ \mathsf{rollback} ~ ((\mathsf{updateUTxO} ~ b ~ u, \mathsf{updatePending} ~ b ~ p, \mathsf{updateExpected} ~ b ~ e) : (u, p, e) : \mathit{cs}) \\
+= & ~ ((u, (\mathsf{updatePending} ~ b ~ p) \cup p,  (\mathsf{updateExpected} ~ b ~ e) \cup e \cup (\dom u \subtractdom \mathsf{updateUTxO} ~ b ~ u)) : \mathit{cs}) \\
+= & ~ ((u, p, e \cup (\dom u \subtractdom \mathsf{updateUTxO} ~ b ~ u)) : \mathit{cs}) \\
+= & ~ ((u, p, e \cup \mathsf{new} ~ b) : \mathit{cs}) = \mathsf{anticipate} ~ b ~ ((u, p, e) : \mathit{cs}) \\
+\end{align*}
+where the last two lines are justified by Lemmas~\ref{lemma:updateExpected_is_filter}
+and~\ref{lemma:update_remove_dom}, respectively.
+\end{proof}
+
+
 \subsection{Invariants}
 
-The most important consequence of introducing rollbacks is that invariant
-\eqref{txins_in_dom_utxo}, which states that
+The most important consequence of introducing rollbacks is that
+Invariant~\ref{inv:txins_in_dom_utxo}, which states that
 %
 \begin{equation*}
 \mathsf{txins} ~ pending \subseteq \dom utxo
@@ -967,7 +1127,7 @@ certain that the blockchain will not roll back so far that they become pending
 again. (This is sufficient to guarantee \eqref{no_dep_trans}.)
 \item \emph{Incoming} transactions should also not be used until we are guaranteed
 that the chain will not rollback past where they were confirmed. (Necessary to
-additionally guarantee \eqref{txins_in_dom_utxo}.)
+additionally guarantee Invariant~\ref{inv:txins_in_dom_utxo}.)
 \end{itemize}
 
 In other words, both transactions submitted by the wallet itself and
@@ -1167,7 +1327,7 @@ should be something like a log cost for each change}
 \subsection{Incremental balance computation and prefiltering}
 
 Neither the derivation of the incremental balance computation nor the derivation
-of prefiltering relied on invariant~\eqref{txins_in_dom_utxo} (although we did
+of prefiltering relied on Invariant~\ref{inv:txins_in_dom_utxo} (although we did
 have to be careful in derivation of prefiltering); this means that their
 definitions translate in a straight-forward manner to this new setting in which
 rollbacks may be present. The type of the wallet becomes
