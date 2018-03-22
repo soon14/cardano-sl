@@ -38,6 +38,15 @@ type API = Tags '["Wallets"] :>
                    :> Summary "Update the Wallet identified by the given walletId."
                    :> ReqBody '[ValidJSON] (Update Wallet)
                    :> Put '[ValidJSON] (WalletResponse Wallet)
+    :<|> "wallets" :> "external"
+                   :> Summary "Creates a new or restores an existing external wallet (mobile client or hardware wallet)."
+                   :> ReqBody '[ValidJSON] (New ExternalWallet)
+                   :> PostCreated '[ValidJSON] (WalletResponse Wallet)
+    :<|> "wallets" :> "external"
+                   :> CaptureWalletId
+                   :> "address-path"
+                   :> Summary "Generates a new BIP44 derivation path for the given external wallet."
+                   :> PostCreated '[ValidJSON] (WalletResponse AddressPath)
     )
     -- Nest the Accounts API, note that it is left out of the "Wallets" tag purposedly
     :<|> "wallets" :> Accounts.API
