@@ -950,6 +950,7 @@ where the last line follows from Lemma~\ref{lemma:updatePending_is_filter} and
 associativity and commutativity of set union.
 
 \subsection{Expected UTxO}
+\label{sec:expected_UTxO}
 
 Consider the scenario where the wallet is informed of a new block, containing
 some transaction $t_1$ that transfers funds to the wallet. These funds are
@@ -991,7 +992,7 @@ track of the ``expected UTxO''.
 & \qquad (\mathit{utxo}', \mathit{pending} \cup \mathit{pending}', \mathit{expected} \cup \mathit{expected}' \cup (\dom \mathit{utxo}' \subtractdom \mathit{utxo})) : \mathit{checkpoints} \\
 \end{align*}
 %
-where
+with the same side condition to $\mathsf{newPending}$ again, and where
 %
 \begin{equation*}
 \mathsf{updateExpected} ~ b ~ \mathit{expected} = \mathsf{txins} ~ b \subtractdom \mathit{expected}
@@ -1091,9 +1092,310 @@ and~\ref{lemma:update_remove_dom}, respectively.
 
 \subsection{Minimum balance}
 
-consistency of pending?
+When the wallet submits new transactions, we expect all of those transactions
+to be eventually included in the blockchain, but there is no guarantee that this
+will happen: perhaps all will, perhaps only some will, perhaps none will. Let's
+refer to this as ``possible futures''. Then a reasonable question we might ask
+is: what is the wallet's \emph{minimum balance in all possible futures}?
 
-consistency of expected?
+Since any transactions submitted by the wallet can only \emph{decrease} the
+wallet's balance, in the absence of rollbacks the minimum balance is given
+by the balance of the wallet when \emph{all} pending transactions have been
+included. But the situation is more complicated when we take rollback into
+account.
+
+\subsubsection{Compatibility of pending transactions}
+
+The first question we might ask: is it possible that in the presence of
+rollbacks two different pending transactions spend the same inputs? If so, there
+is no possible future in which both of these transactions are included into the
+blockchain. Fortunately, this is not the case:
+
+\begin{invariant}
+Given a $\mathit{pending}$ set in one of the wallets checkpoints,
+\begin{equation*}
+\forall (\mathit{ins}_1, \mathit{outs}_1), (\mathit{ins}_2, \mathit{outs}_2) \in \mathit{pending} \text{ where } (\mathit{ins}_1, \mathit{outs}_1) \ne (\mathit{ins}_2, \mathit{outs}_2) \cdot
+\mathit{ins}_1 \cap \mathit{ins}_2 = \emptyset
+\end{equation*}
+\end{invariant}
+
+\begin{proof}[Proof (sketch)]
+By induction on the wallet construction. The cases for the empty wallet,
+$\mathsf{applyBlock}$ and $\mathsf{newPending}$ are straight-forward.
+The case for rollback is trickier. We have two pending sets
+$\mathit{pending}$ and $\mathit{pending'}$, and we know that the invariant
+holds for both. Is it possible that there is a transaction $t_1$ in $\mathit{pending}$
+that spends the same input as a different transaction $t_2$ in $\mathit{pending}'$?
+
+To answer this question, we must take into account how the wallet's checkpoints
+are created: $\mathsf{applyBlock}$ introduces a new checkpoint, possibly
+reducing the pending set, and then new pending transactions are inserted using
+$\mathsf{newPending}$.
+
+First, consider the case where $t_2 \in \mathit{pending}$ (i.e., $t_2$ was not
+removed by the call to $\mathsf{applyBlock}$). In that case, we cannot have $t_1
+\in \mathit{pending}$ due to the side condition to $\mathsf{newPending}$.
+
+In the case where $t_2 \notin \mathit{pending}$, this must be because $t_2$
+has been included in the blockchain and hence $\mathsf{applyBlock}$ removed
+it from the pending set. But in this case, $\mathsf{applyBlock}$ will also
+have removed all of $t_2$'s inputs from the UTxO, and hence it's not possible
+that the new transaction $t_1$ used any of these same inputs.
+\end{proof}
+
+\todo[inline]{In order to turn this proof sketch into an actual proof
+we'd need to state additional invariants about the checkpoints of the wallet
+and probably prove a stronger induction hypothesis.}
+
+\subsubsection{Compatibility of expected transactions}
+\label{sec:compat_of_expected_trans}
+
+Does this mean that there is a possible future in which all pending transactions
+are committed? No, not necessarily. As discussed in
+Section~\ref{sec:expected_UTxO}, in the presence of rollbacks it is possible
+that some pending transactions depend on some expected transactions. Moreover,
+it is clearly quite possible (indeed, likely) for two different expected
+transactions to spend the same input.
+
+In the same section we also discussed that we may wish to keep track of those
+expected transactions so that we can resubmit them. We concluded that there
+was no point because it would mean that we'd have to keep track of the
+entire blockchain in the wallet, and so we decided to keep track of the
+expected UTxO only, rather than expected transactions.
+
+But unless we keep track of the expected transactions, we don't know what their
+inputs are, and if we don't know what their inputs are, we don't know which
+expected transactions are mutually compatible, making it impossible to
+accurately compute the possible futures. So should we keep track of the expected
+transactions after all? No, here too keeping track of just the expected
+transactions (incoming transactions that transfer funds to the wallet) is
+insufficient. It is entirely possible that two expected transactions $t_1$ and
+$t_2$ cannot both be committed to the blockchain even though they have disjoint
+inputs, because $t_1$ might input from $t_1'$ and $t_2$ might input from $t_2'$,
+and $t_1'$ and $t_2'$ share some inputs. Worse, $t_1'$ and $t_2'$ might have
+nothing to do with the wallet (neither transfer funds from nor transfer funds to
+the wallet). As before, in the worst case this means that we need to keep
+track of the entire blockchain.
+
+\subsubsection{Computing the minimum balance}
+
+In general we can have pending transactions dependent on each other, expected
+transactions dependent on each other, as well as pending transactions depending
+on expected transactions and vice versa. Figure~\ref{fig:trans_deps} shows
+some of the possibilities, and computes in which possible future the wallet's
+balance is minimum.
+
+As discussed in Section~\ref{sec:compat_of_expected_trans}, however, we don't
+have accurate information about the dependencies of expected transactions. This
+means that when we compute the wallet's minimum balance, we need to be
+conservative.
+
+One possibility is to assume that \emph{none} of the expected transactions
+will be committed, and all of the pending ones. This is however overly
+conservative. For the pending transactions, we \emph{do} know the dependencies;
+moreover, the expected UTxO tells us how much those expected transactions
+transfer to the wallet.
+
+\begin{figure}[p]
+
+\newcommand{\Y}[1]{#1}
+\newcommand{\N}[1]{\overline{#1}}
+
+\small
+
+\begin{tabular}{lll}
+%%%
+\multicolumn{3}{l}{\emph{Single independent tranasction}} \\
+\begin{forest}
+[$(t_1: c_1)$]
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+   0 & \overline{t_1} \\
+ c_1 & t_1
+\end{cases}
+\end{math}
+&
+include if $c_1 \le 0$
+\\
+%%%
+\\
+\multicolumn{3}{l}{\emph{One transaction dependent on one other} (picking assuming $c_1 \le 0$)} \\
+\begin{forest}
+[$(t_1: c_1)$, baseline [$(t_2: c_2)$]]
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+0         & \N{t_1} \, \N{t_2} \\
+c_2       & \N{t_1} \, \Y{t_2} \\
+c_2 + c_1 & \Y{t_2} \, \Y{t_2}
+\end{cases}
+\end{math}
+&
+\begin{math}
+\begin{array}{ll|l}
+c_2 &                    & \text{pick}        \\ \hline
+< 0 &                    & \Y{t_1} \, \Y{t_2} \\
+> 0 & c_1 + c_2 \le 0    & \Y{t_1} \, \Y{t_2} \\
+    & \textit{otherwise} & \N{t_1} \, \N{t_2} \\
+\end{array}
+\end{math} \\
+\\
+%%%
+\\
+\multicolumn{3}{l}{\emph{Linear chain} (picking assuming $c_1 \le 0$)} \\
+\begin{forest}
+[$(t_1: c_1)$
+  [$(t_2: c_2)$, baseline
+    [$(t_3: c_3)$]
+  ]
+]
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+0               & \N{t_1} \, \N{t_2} \, \N{t_3} \\
+c_3             & \N{t_1} \, \N{t_2} \, \Y{t_3} \\
+c_3 + c_2       & \N{t_1} \, \Y{t_2} \, \Y{t_3} \\
+c_3 + c_2 + c_1 & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
+\end{cases}
+\end{math}
+&
+\begin{math}
+\begin{array}{lll|l}
+c_2 & c_3 &                         & \text{pick}             \\ \hline
+< 0 & < 0 &                         & \Y{t_1} \Y{t_2} \Y{t_3} \\
+< 0 & > 0 & (c_1 + c_2) + c_3 \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
+> 0 & < 0 & c_1 + c_2 \le 0         & \Y{t_1} \Y{t_2} \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \Y{t_3} \\
+> 0 & > 0 & c_1 + (c_2 + c_3) \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
+\end{array}
+\end{math}
+\\
+% \end{tabular}
+% \end{figure}
+%
+% \begin{figure}[p]
+% \begin{tabular}{lll}
+%%%
+\\
+\multicolumn{3}{l}{\emph{One transaction dependent on two others} (picking assuming $c_1 \le 0$)} \\
+\begin{forest}
+[$(t_1: c_1)$ [$(t_2: c_2)$] [$(t_3: c_3)$]]
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+0               & \N{t_1} \, \N{t_2} \, \N{t_3} \\
+c_3             & \N{t_1} \, \N{t_2} \, \Y{t_3} \\
+c_2             & \N{t_1} \, \Y{t_2} \, \N{t_3} \\
+c_3 + c_2       & \N{t_1} \, \Y{t_2} \, \Y{t_3} \\
+c_3 + c_2 + c_1 & \Y{t_1} \, \Y{t_2} \, \Y{t_3}
+\end{cases}
+\end{math}
+&
+\begin{math}
+\begin{array}{lll|l}
+c_2 & c_3 &                         & \text{pick} \\ \hline
+< 0 & < 0 &                         & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
+< 0 & > 0 & c_1 + c_3 \le 0         & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \, \Y{t_2} \, \N{t_3} \\
+> 0 & < 0 & c_1 + c_2 \le 0         & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \, \N{t_2} \, \Y{t_3} \\
+> 0 & > 0 & c_1 + (c_2 + c_3) \le 0 & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
+    &     & \textit{otherwise}      & \N{t_1} \, \N{t_2} \, \N{t_3} \\
+\end{array}
+\end{math}
+\\
+%%%
+\\
+\multicolumn{3}{l}{\emph{Two transactions depending on a single other} (picking assuming $c_1 \le 0, c_2 \le 0$)} \\
+\begin{forest}
+  [,phantom
+  [$(t_1: c_1)$ [$(t_3: c_3)$, name=t3]]
+  [$(t_2: c_2)$] {\draw () to (t3);}
+  ]
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+0               & \N{t_1} \N{t_2} \N{t_3} \\
+c_3             & \N{t_1} \N{t_2} \Y{t_3} \\
+c_3 + c_2       & \N{t_1} \Y{t_2} \Y{t_3} \\
+c_3 + c_1       & \Y{t_1} \N{t_2} \Y{t_3} \\
+c_3 + c_2 + c_1 & \Y{t_1} \Y{t_2} \Y{t_3}
+\end{cases}
+\end{math}
+&
+\begin{math}
+\begin{array}{ll|l}
+c_3 &                         & \text{pick}             \\ \hline
+< 0 &                         & \Y{t_1} \Y{t_2} \Y{t_3} \\
+> 0 & (c_1 + c_2) + c_3 \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
+    & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
+\end{array}
+\end{math} \\
+%%%
+\\
+\multicolumn{3}{l}{\emph{Common ancestor}} \\
+\begin{forest}
+[$(t_1: c_1)$
+  [$(t_2: c_2)$, baseline [,phantom] [$(t_4: c_4)$, name=t4]]
+  [$(t_3: c_3)$] {\draw () to (t4);}
+]
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+0                     & \N{t_1} \N{t_2} \N{t_3} \N{t_4} \\
+c_4                   & \N{t_1} \N{t_2} \N{t_3} \Y{t_4} \\
+c_4 + c_3             & \N{t_1} \N{t_2} \Y{t_3} \Y{t_4} \\
+c_4 + c_2             & \N{t_1} \Y{t_2} \N{t_3} \Y{t_4} \\
+c_4 + c_3 + c_2       & \N{t_1} \Y{t_2} \Y{t_3} \Y{t_4} \\
+c_4 + c_3 + c_2 + c_1 & \Y{t_1} \Y{t_2} \Y{t_3} \Y{t_4}
+\end{cases}
+\end{math}
+\\
+%%%
+\\
+\multicolumn{3}{l}{\emph{Direct and indirect dependency}} \\
+\begin{forest}
+[$(t_1: c_1)$
+  [$(t_2: c_2)$, baseline [,phantom] [$(t_3: c_3)$, name=t3]]
+  [,phantom]
+] {\draw () to[out=south east, in=north east] (t3);}
+\end{forest}
+&
+\begin{math}
+\Delta =
+\begin{cases}
+ & \N{t_1} \N{t_2} \N{t_3} \\
+ & \N{t_1} \N{t_2} \Y{t_3} \\
+ & \N{t_1} \Y{t_2} \Y{t_3} \\
+ & \Y{t_1} \Y{t_2} \Y{t_3} \\
+\end{cases}
+\end{math}
+
+\caption{\label{fig:trans_deps}Some possible dependency graphs between transactions}
+
+\end{tabular}
+\end{figure}
+
+\clearpage
+
+
+
+
 
 
 \subsection{Invariants}
@@ -1453,203 +1755,6 @@ if we do include it, it doesn't force our hand either way for those
 other transactions.
 
 
-\newcommand{\Y}[1]{#1}
-\newcommand{\N}[1]{\overline{#1}}
-
-
-\begin{figure}[p]
-
-\small
-
-\begin{tabular}{lll}
-%%%
-\multicolumn{3}{l}{\emph{Single independent tranasction}} \\
-\begin{forest}
-[$(t_1: c_1)$]
-\end{forest}
-&
-\begin{math}
-\Delta =
-\begin{cases}
-   0 & \overline{t_1} \\
- c_1 & t_1
-\end{cases}
-\end{math}
-&
-include if $c_1 \le 0$
-\\
-%%%
-\\
-\multicolumn{3}{l}{\emph{One transaction dependent on one other} (picking assuming $c_1 \le 0$)} \\
-\begin{forest}
-[$(t_1: c_1)$, baseline [$(t_2: c_2)$]]
-\end{forest}
-&
-\begin{math}
-\Delta =
-\begin{cases}
-0         & \N{t_1} \, \N{t_2} \\
-c_2       & \N{t_1} \, \Y{t_2} \\
-c_2 + c_1 & \Y{t_2} \, \Y{t_2}
-\end{cases}
-\end{math}
-&
-\begin{math}
-\begin{array}{ll|l}
-c_2 &                    & \text{pick}        \\ \hline
-< 0 &                    & \Y{t_1} \, \Y{t_2} \\
-> 0 & c_1 + c_2 \le 0    & \Y{t_1} \, \Y{t_2} \\
-    & \textit{otherwise} & \N{t_1} \, \N{t_2} \\
-\end{array}
-\end{math} \\
-\\
-%%%
-\\
-\multicolumn{3}{l}{\emph{Linear chain} (picking assuming $c_1 \le 0$)} \\
-\begin{forest}
-[$(t_1: c_1)$
-  [$(t_2: c_2)$, baseline
-    [$(t_3: c_3)$]
-  ]
-]
-\end{forest}
-&
-\begin{math}
-\Delta =
-\begin{cases}
-0               & \N{t_1} \, \N{t_2} \, \N{t_3} \\
-c_3             & \N{t_1} \, \N{t_2} \, \Y{t_3} \\
-c_3 + c_2       & \N{t_1} \, \Y{t_2} \, \Y{t_3} \\
-c_3 + c_2 + c_1 & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
-\end{cases}
-\end{math}
-&
-\begin{math}
-\begin{array}{lll|l}
-c_2 & c_3 &                         & \text{pick}             \\ \hline
-< 0 & < 0 &                         & \Y{t_1} \Y{t_2} \Y{t_3} \\
-< 0 & > 0 & (c_1 + c_2) + c_3 \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
-    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
-> 0 & < 0 & c_1 + c_2 \le 0         & \Y{t_1} \Y{t_2} \Y{t_3} \\
-    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \Y{t_3} \\
-> 0 & > 0 & c_1 + (c_2 + c_3) \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
-    &     & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
-\end{array}
-\end{math}
-\\
-% \end{tabular}
-% \end{figure}
-%
-% \begin{figure}[p]
-% \begin{tabular}{lll}
-%%%
-\\
-\multicolumn{3}{l}{\emph{One transaction dependent on two others} (picking assuming $c_1 \le 0$)} \\
-\begin{forest}
-[$(t_1: c_1)$ [$(t_2: c_2)$] [$(t_3: c_3)$]]
-\end{forest}
-&
-\begin{math}
-\Delta =
-\begin{cases}
-0               & \N{t_1} \, \N{t_2} \, \N{t_3} \\
-c_3             & \N{t_1} \, \N{t_2} \, \Y{t_3} \\
-c_2             & \N{t_1} \, \Y{t_2} \, \N{t_3} \\
-c_3 + c_2       & \N{t_1} \, \Y{t_2} \, \Y{t_3} \\
-c_3 + c_2 + c_1 & \Y{t_1} \, \Y{t_2} \, \Y{t_3}
-\end{cases}
-\end{math}
-&
-\begin{math}
-\begin{array}{lll|l}
-c_2 & c_3 &                         & \text{pick} \\ \hline
-< 0 & < 0 &                         & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
-< 0 & > 0 & c_1 + c_3 \le 0         & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
-    &     & \textit{otherwise}      & \N{t_1} \, \Y{t_2} \, \N{t_3} \\
-> 0 & < 0 & c_1 + c_2 \le 0         & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
-    &     & \textit{otherwise}      & \N{t_1} \, \N{t_2} \, \Y{t_3} \\
-> 0 & > 0 & c_1 + (c_2 + c_3) \le 0 & \Y{t_1} \, \Y{t_2} \, \Y{t_3} \\
-    &     & \textit{otherwise}      & \N{t_1} \, \N{t_2} \, \N{t_3} \\
-\end{array}
-\end{math}
-\\
-%%%
-\\
-\multicolumn{3}{l}{\emph{Two transactions depending on a single other} (picking assuming $c_1 \le 0, c_2 \le 0$)} \\
-\begin{forest}
-  [,phantom
-  [$(t_1: c_1)$ [$(t_3: c_3)$, name=t3]]
-  [$(t_2: c_2)$] {\draw () to (t3);}
-  ]
-\end{forest}
-&
-\begin{math}
-\Delta =
-\begin{cases}
-0               & \N{t_1} \N{t_2} \N{t_3} \\
-c_3             & \N{t_1} \N{t_2} \Y{t_3} \\
-c_3 + c_2       & \N{t_1} \Y{t_2} \Y{t_3} \\
-c_3 + c_1       & \Y{t_1} \N{t_2} \Y{t_3} \\
-c_3 + c_2 + c_1 & \Y{t_1} \Y{t_2} \Y{t_3}
-\end{cases}
-\end{math}
-&
-\begin{math}
-\begin{array}{ll|l}
-c_3 &                         & \text{pick}             \\ \hline
-< 0 &                         & \Y{t_1} \Y{t_2} \Y{t_3} \\
-> 0 & (c_1 + c_2) + c_3 \le 0 & \Y{t_1} \Y{t_2} \Y{t_3} \\
-    & \textit{otherwise}      & \N{t_1} \N{t_2} \N{t_3} \\
-\end{array}
-\end{math} \\
-%%%
-\\
-\multicolumn{3}{l}{\emph{Common ancestor}} \\
-\begin{forest}
-[$(t_1: c_1)$
-  [$(t_2: c_2)$, baseline [,phantom] [$(t_4: c_4)$, name=t4]]
-  [$(t_3: c_3)$] {\draw () to (t4);}
-]
-\end{forest}
-&
-\begin{math}
-\Delta =
-\begin{cases}
-0                     & \N{t_1} \N{t_2} \N{t_3} \N{t_4} \\
-c_4                   & \N{t_1} \N{t_2} \N{t_3} \Y{t_4} \\
-c_4 + c_3             & \N{t_1} \N{t_2} \Y{t_3} \Y{t_4} \\
-c_4 + c_2             & \N{t_1} \Y{t_2} \N{t_3} \Y{t_4} \\
-c_4 + c_3 + c_2       & \N{t_1} \Y{t_2} \Y{t_3} \Y{t_4} \\
-c_4 + c_3 + c_2 + c_1 & \Y{t_1} \Y{t_2} \Y{t_3} \Y{t_4}
-\end{cases}
-\end{math}
-\\
-%%%
-\\
-\multicolumn{3}{l}{\emph{Direct and indirect dependency}} \\
-\begin{forest}
-[$(t_1: c_1)$
-  [$(t_2: c_2)$, baseline [,phantom] [$(t_3: c_3)$, name=t3]]
-  [,phantom]
-] {\draw () to[out=south east, in=north east] (t3);}
-\end{forest}
-&
-\begin{math}
-\Delta =
-\begin{cases}
- & \N{t_1} \N{t_2} \N{t_3} \\
- & \N{t_1} \N{t_2} \Y{t_3} \\
- & \N{t_1} \Y{t_2} \Y{t_3} \\
- & \Y{t_1} \Y{t_2} \Y{t_3} \\
-\end{cases}
-\end{math}
-
-\caption{\label{fig:trans_deps}Some possible dependency graphs between transactions}
-
-\end{tabular}
-\end{figure}
-
-\clearpage
 
 
 \section{TODO: History tracking}
