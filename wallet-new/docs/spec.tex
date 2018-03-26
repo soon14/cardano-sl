@@ -1194,7 +1194,89 @@ One possibility is to assume that \emph{none} of the expected transactions
 will be committed, and all of the pending ones. This is however overly
 conservative. For the pending transactions, we \emph{do} know the dependencies;
 moreover, the expected UTxO tells us how much those expected transactions
-transfer to the wallet.
+transfer to the wallet. We would like to establish a tighter bound.
+
+The goal then is to pick a set $S$ of pending and expected transactions that
+minimizes the wallet's balance, and is self-consistent in the sense that
+if $t_1 \in S$ and $t_1$ has a known dependency on $t_2$, then $t_2$ also in
+$S$. Note that the absence of dependency information only gives us \emph{more}
+freedom in picking the elements of this set; thus, missing dependency
+information may make the lower bound that we establish less accurate, but it
+will still be a lower bound.
+
+In order to establish a tighter lower bound it is important not to ignore
+dependencies between pending transactions, because they may imply (transitive)
+dependencies on expected transactions. Consider the following
+example:
+%
+\begin{center}
+\begin{forest}
+[$(t_1 : -2)$
+  [$(t_2: +1)$]
+  [$(t_3: -1)$
+    [$(t_4: +3)$]
+  ]
+]
+\end{forest}
+\end{center}
+%
+If we ignore the fact that pending transaction $t_1$ depends on pending
+transaction $t_3$, then we would pick $S = \{t_1, t_2\}$ for a balance
+difference $\Delta_S$ of $-1$. In reality however the possible futures are
+
+\begin{tabular}{ll}
+$S$ & Difference in balance $\Delta_S$ \\ \hline
+$\emptyset$              & 0  \\
+$\{t_2\}$                & +1 \\
+$\{t_4\}$                & +3 \\
+$\{t_2, t_4\}$           & +4 \\
+$\{t_3, t_4\}$           & +2 \\
+$\{t_2, t_3, t_4\}$      & +3 \\
+$\{t_1, t_2, t_3, t_4\}$ & +1 \\
+\end{tabular}
+
+\noindent
+so that the minimum balance is actually given by $S = \emptyset$.
+
+Unfortunately this does seem to imply some kind of search. For instance, consider
+
+\begin{center}
+\begin{forest}
+[,phantom
+  [$(t_1: -1)$] {\draw () to (y1);}
+  [$(t_2: -3)$
+    [$(t_4: +3)$,name=y1]
+    [$(t_5: +2)$,name=y2]
+  ]
+  [($t_3: -1)$] {\draw () to (y2);}
+]
+\end{forest}
+\end{center}
+
+Suppose we first consider if we should include the expected transaction $t_4$.
+Since the effect $\Delta_S$ of $S = \{t_1, t_2, t_4\}$ is $-1$ (i.e.,
+reduces the wallet's balance) we conclude that we should. We then consider
+what happens if we should also add $\{t_5, t_3\}$ to $S$, and conclude that
+we shouldn't, since this would give rise to a total $\Delta$ value of 0. However,
+the minimum delta is actually given by $\Delta_{\{t_2, t_3, t_5\}} = 2$.
+
+This suggests that the wallet's balance is minimized by
+%
+\begin{equation*}
+\bigsqcup_{\mathcal{E} \in \mathbb{P}(\mathit{expected})}
+\bigsqcup_{\mathcal{P} \in \mathbb{P}(\mathit{pending}),~(\mathcal{E} \cup \mathcal{P}) \text{ consistent}}
+(\mathcal{S} \cup \mathcal{P})
+\end{equation*}
+%
+which would result in an algorithm that is exponential in the number of
+expected transactions. Fortunately however we can do better than that. If we
+group the expected transactions such that two expected transactions are
+in the same group if and only if their transitive dependencies overlap,
+we can consider each group independently. This gives rise to an algorithm
+which is linear in the number of expected transactions and exponential in the
+size of the largest such group, which is hopefully relatively small.
+(In cases where it is too large, we can always fall back on a more conservative
+estimate.)
 
 \begin{figure}[p]
 
