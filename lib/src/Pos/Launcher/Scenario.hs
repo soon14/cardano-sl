@@ -13,10 +13,9 @@ import           Universum
 
 import qualified Data.HashMap.Strict as HM
 import           Formatting (bprint, build, int, sformat, shown, (%))
-import           Mockable (mapConcurrently, race)
+import           Mockable (Mockable, Async, mapConcurrently)
 import           Serokell.Util (listJson)
-import           System.Exit (ExitCode (..))
-import           System.Wlog (WithLogger, askLoggerName, logDebug, logInfo, logWarning)
+import           System.Wlog (WithLogger, askLoggerName, logInfo)
 
 import           Pos.Communication (OutSpecs)
 import           Pos.Communication.Util (ActionSpec (..), wrapActionSpec)
@@ -28,9 +27,7 @@ import           Pos.Crypto (pskDelegatePk)
 import qualified Pos.DB.BlockIndex as DB
 import qualified Pos.GState as GS
 import           Pos.Launcher.Resource (NodeResources (..))
-import           Pos.NtpCheck (NtpStatus (..), ntpSettings, withNtpCheck)
 import           Pos.Reporting (reportError)
-import           Pos.Shutdown (waitForShutdown)
 import           Pos.Slotting (waitSystemStart)
 import           Pos.Txp (bootDustThreshold)
 import           Pos.Update.Configuration (HasUpdateConfiguration, curSoftwareVersion,
@@ -46,13 +43,15 @@ import           Pos.WorkMode.Class (WorkMode)
 -- Initialization, running of workers, running of plugins.
 runNode'
     :: forall ext ctx m.
-       ( HasCompileInfo, WorkMode ctx m
+       ( HasCompileInfo
+       , WorkMode ctx m
+       , Mockable Async m
        )
     => NodeResources ext
     -> [WorkerSpec m]
     -> [WorkerSpec m]
     -> WorkerSpec m
-runNode' NodeResources {..} workers' plugins' = ActionSpec $ \diffusion -> ntpCheck $ do
+runNode' NodeResources {..} workers' plugins' = ActionSpec $ \diffusion -> do
     logInfo $ "Built with: " <> pretty compileInfo
     nodeStartMsg
     inAssertMode $ logInfo "Assert mode on"
@@ -89,15 +88,10 @@ runNode' NodeResources {..} workers' plugins' = ActionSpec $ \diffusion -> ntpCh
     let unpackPlugin (ActionSpec action) =
             action diffusion `catch` reportHandler
 
-    -- Either all the plugins are cancelled in the case one of them
-    -- throws an error, or otherwise when the shutdown signal comes,
-    -- they are killed automatically.
-    void
-      (race
-           (void (mapConcurrently (unpackPlugin) $ workers' ++ plugins'))
-           waitForShutdown)
+    void (mapConcurrently (unpackPlugin) $ workers' ++ plugins')
 
-    exitWith (ExitFailure 20)
+    exitFailure
+
   where
     -- FIXME shouldn't this kill the whole program?
     -- FIXME: looks like something bad.
@@ -108,7 +102,6 @@ runNode' NodeResources {..} workers' plugins' = ActionSpec $ \diffusion -> ntpCh
             sformat ("Worker/plugin with logger name "%shown%
                     " failed with exception: "%shown)
             loggerName e
-    ntpCheck = withNtpCheck $ ntpSettings onNtpStatusLogWarning
 
 -- | Entry point of full node.
 -- Initialization, running of workers, running of plugins.
@@ -124,16 +117,6 @@ runNode nr (plugins, plOuts) =
   where
     (workers', wOuts) = allWorkers nr
     plugins' = map (wrapActionSpec "plugin") plugins
-
-onNtpStatusLogWarning :: WithLogger m => NtpStatus -> m ()
-onNtpStatusLogWarning = \case
-    NtpSyncOk -> logDebug $
-              -- putText  $ -- FIXME: for some reason this message isn't printed
-                            -- when using 'logDebug', but a simple 'putText' works
-                            -- just fine.
-        "Local time is in sync with the NTP server"
-    NtpDesync diff -> logWarning $
-        "Local time is severely off sync with the NTP server: " <> show diff
 
 -- | This function prints a very useful message when node is started.
 nodeStartMsg :: (HasUpdateConfiguration, WithLogger m) => m ()

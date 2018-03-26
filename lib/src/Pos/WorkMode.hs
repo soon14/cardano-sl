@@ -29,26 +29,26 @@ import           Pos.Context (HasNodeContext (..), HasPrimaryKey (..), HasSscCon
 import           Pos.Core (HasConfiguration)
 import           Pos.DB (MonadGState (..), NodeDBs)
 import           Pos.DB.Block (dbGetSerBlockRealDefault, dbGetSerUndoRealDefault,
-                               dbPutSerBlundRealDefault)
+                               dbPutSerBlundsRealDefault)
 import           Pos.DB.Class (MonadDB (..), MonadDBRead (..))
 import           Pos.DB.DB (gsAdoptedBVDataDefault)
 import           Pos.DB.Rocks (dbDeleteDefault, dbGetDefault, dbIterSourceDefault, dbPutDefault,
                                dbWriteBatchDefault)
 import           Pos.Delegation.Class (DelegationVar)
 import           Pos.DHT.Real.Param (KademliaParams)
-import           Pos.Infra.Configuration (HasInfraConfiguration)
 import           Pos.KnownPeers (MonadFormatPeers (..))
 import           Pos.Network.Types (HasNodeType (..), getNodeTypeDefault)
 import           Pos.Reporting (HasReportingContext (..))
 import           Pos.Shutdown (HasShutdownContext (..))
 import           Pos.Slotting.Class (MonadSlots (..))
-import           Pos.Slotting.Impl.Sum (currentTimeSlottingSum, getCurrentSlotBlockingSum,
-                                        getCurrentSlotInaccurateSum, getCurrentSlotSum)
+import           Pos.Slotting.Impl (currentTimeSlottingSimple,
+                                    getCurrentSlotBlockingSimple,
+                                    getCurrentSlotInaccurateSimple, getCurrentSlotSimple)
 import           Pos.Slotting.MemState (HasSlottingVar (..), MonadSlotsData)
 import           Pos.Ssc.Mem (SscMemTag)
 import           Pos.Ssc.Types (SscState)
-import           Pos.Txp (GenericTxpLocalData, MempoolExt, MonadTxpLocal (..), TxpHolderTag,
-                          txNormalize, txProcessTransaction)
+import           Pos.Txp (GenericTxpLocalData, HasTxpConfiguration, MempoolExt, MonadTxpLocal (..),
+                          TxpHolderTag, txNormalize, txProcessTransaction)
 import           Pos.Util.CompileInfo (HasCompileInfo)
 import           Pos.Util.JsonLog (HasJsonLogConfig (..), JsonLogConfig, jsonLogDefault)
 import           Pos.Util.Lens (postfixLFields)
@@ -140,13 +140,13 @@ instance {-# OVERLAPPING #-} HasLoggerName (RealMode ext) where
 instance {-# OVERLAPPING #-} CanJsonLog (RealMode ext) where
     jsonLog = jsonLogDefault
 
-instance (HasConfiguration, HasInfraConfiguration, MonadSlotsData ctx (RealMode ext))
+instance (HasConfiguration, MonadSlotsData ctx (RealMode ext))
       => MonadSlots ctx (RealMode ext)
   where
-    getCurrentSlot = getCurrentSlotSum
-    getCurrentSlotBlocking = getCurrentSlotBlockingSum
-    getCurrentSlotInaccurate = getCurrentSlotInaccurateSum
-    currentTimeSlotting = currentTimeSlottingSum
+    getCurrentSlot = getCurrentSlotSimple
+    getCurrentSlotBlocking = getCurrentSlotBlockingSimple
+    getCurrentSlotInaccurate = getCurrentSlotInaccurateSimple
+    currentTimeSlotting = currentTimeSlottingSimple
 
 instance HasConfiguration => MonadGState (RealMode ext) where
     gsAdoptedBVData = gsAdoptedBVDataDefault
@@ -164,7 +164,7 @@ instance HasConfiguration => MonadDB (RealMode ext) where
     dbPut = dbPutDefault
     dbWriteBatch = dbWriteBatchDefault
     dbDelete = dbDeleteDefault
-    dbPutSerBlund = dbPutSerBlundRealDefault
+    dbPutSerBlunds = dbPutSerBlundsRealDefault
 
 instance MonadBListener (RealMode ext) where
     onApplyBlocks = onApplyBlocksStub
@@ -175,7 +175,7 @@ instance MonadFormatPeers (RealMode ext) where
 
 type instance MempoolExt (RealMode ext) = ext
 
-instance (HasConfiguration, HasInfraConfiguration, HasCompileInfo) =>
+instance (HasConfiguration, HasTxpConfiguration, HasCompileInfo) =>
          MonadTxpLocal (RealMode ()) where
     txpNormalize = txNormalize
     txpProcessTx = txProcessTransaction

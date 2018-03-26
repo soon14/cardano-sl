@@ -16,6 +16,7 @@ import           Control.Monad.Trans.Control (MonadBaseControl)
 import qualified Crypto.Random as Rand
 import           Mockable (MonadMockable)
 import           System.Wlog (WithLogger)
+import           UnliftIO (MonadUnliftIO)
 
 import           Pos.Block.BListener (MonadBListener)
 import           Pos.Block.Configuration (HasBlockConfiguration)
@@ -31,7 +32,6 @@ import           Pos.DB.Rocks (MonadRealDB)
 import           Pos.Delegation.Class (MonadDelegation)
 import           Pos.Delegation.Configuration (HasDlgConfiguration)
 import           Pos.DHT.Real.Param (KademliaParams)
-import           Pos.Infra.Configuration (HasInfraConfiguration)
 import           Pos.Lrc.Context (HasLrcContext)
 import           Pos.Network.Types (HasNodeType, NetworkConfig)
 import           Pos.Recovery.Info (MonadRecoveryInfo)
@@ -97,8 +97,8 @@ type MinWorkMode m
       , CanJsonLog m
       , MonadMockable m
       , MonadIO m
+      , MonadUnliftIO m
       , HasConfiguration
-      , HasInfraConfiguration
       , HasUpdateConfiguration
       , HasNodeConfiguration
       , HasBlockConfiguration

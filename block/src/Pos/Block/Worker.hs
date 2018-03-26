@@ -13,7 +13,7 @@ import           Control.Lens (ix)
 import qualified Data.List.NonEmpty as NE
 import           Data.Time.Units (Microsecond)
 import           Formatting (Format, bprint, build, fixed, int, now, sformat, shown, (%))
-import           Mockable (delay, fork)
+import           Mockable (delay)
 import           Serokell.Util (enumerate, listJson, pairF, sec)
 import qualified System.Metrics.Label as Label
 import           System.Random (randomRIO)
@@ -21,6 +21,8 @@ import           System.Wlog (logDebug, logError, logInfo, logWarning)
 
 import           Pos.Block.BlockWorkMode (BlockWorkMode)
 import           Pos.Block.Configuration (networkDiameter)
+import           Pos.Block.Configuration (HasBlockConfiguration, criticalCQ, criticalCQBootstrap,
+                                          fixedTimeCQSec, nonCriticalCQ, nonCriticalCQBootstrap)
 import           Pos.Block.Logic (calcChainQualityFixedTime, calcChainQualityM,
                                   calcOverallChainQuality, createGenesisBlockAndApply,
                                   createMainBlockAndApply)
@@ -31,14 +33,10 @@ import           Pos.Block.Slog (scCQFixedMonitorState, scCQOverallMonitorState,
                                  scEpochMonitorState, scGlobalSlotMonitorState,
                                  scLocalSlotMonitorState, slogGetLastSlots)
 import           Pos.Communication.Protocol (OutSpecs)
-import           Pos.Core (BlockVersionData (..), ChainDifficulty, FlatSlotId, SlotId (..),
-                           Timestamp (Timestamp), blkSecurityParam, difficultyL, epochOrSlotToSlot,
-                           epochSlots, fixedTimeCQSec, flattenSlotId, gbHeader, getEpochOrSlot,
-                           getSlotIndex, slotIdF, unflattenSlotId)
-import           Pos.Core.Common (addressHash)
-import           Pos.Core.Configuration (HasConfiguration, criticalCQ, criticalCQBootstrap,
-                                         nonCriticalCQ, nonCriticalCQBootstrap)
-import           Pos.Core.Context (getOurPublicKey)
+import           Pos.Core (BlockVersionData (..), ChainDifficulty, FlatSlotId, HasConfiguration,
+                           SlotId (..), Timestamp (Timestamp), addressHash, blkSecurityParam,
+                           difficultyL, epochOrSlotToSlot, epochSlots, flattenSlotId, gbHeader,
+                           getEpochOrSlot, getOurPublicKey, getSlotIndex, slotIdF, unflattenSlotId)
 import           Pos.Crypto (ProxySecretKey (pskDelegatePk))
 import           Pos.DB (gsIsBootstrapEra)
 import qualified Pos.DB.BlockIndex as DB
@@ -52,7 +50,8 @@ import           Pos.Recovery.Info (getSyncStatus, getSyncStatusK, needTriggerRe
                                     recoveryCommGuard)
 import           Pos.Reporting (MetricMonitor (..), MetricMonitorState, noReportMonitor,
                                 recordValue, reportOrLogE)
-import           Pos.Slotting (currentTimeSlotting, getSlotStartEmpatically)
+import           Pos.Slotting (ActionTerminationPolicy (..), OnNewSlotParams (..),
+                               currentTimeSlotting, defaultOnNewSlotParams, getSlotStartEmpatically)
 import           Pos.Update.DB (getAdoptedBVData)
 import           Pos.Util (mconcatPair)
 import           Pos.Util.Chrono (OldestFirst (..))
@@ -81,7 +80,7 @@ blkWorkers =
 
 informerWorker :: BlockWorkMode ctx m => (WorkerSpec m, OutSpecs)
 informerWorker =
-    onNewSlotWorker True mempty $ \slotId _ ->
+    onNewSlotWorker defaultOnNewSlotParams mempty $ \slotId _ ->
         recoveryCommGuard "onNewSlot worker, informerWorker" $ do
             tipHeader <- DB.getTipHeader
             -- Printe tip header
@@ -102,16 +101,17 @@ informerWorker =
 -- Block creation worker
 ----------------------------------------------------------------------------
 
--- TODO [CSL-1606] Using 'fork' here is quite bad, it's a temporary solution.
 blkCreatorWorker :: BlockWorkMode ctx m => (WorkerSpec m, OutSpecs)
 blkCreatorWorker =
-    onNewSlotWorker True mempty $ \slotId diffusion ->
+    onNewSlotWorker onsp mempty $ \slotId diffusion ->
         recoveryCommGuard "onNewSlot worker, blkCreatorWorker" $
-            void $ fork $
-            blockCreator slotId diffusion `catchAny` onBlockCreatorException
+        blockCreator slotId diffusion `catchAny` onBlockCreatorException
   where
     onBlockCreatorException = reportOrLogE "blockCreator failed: "
-
+    onsp :: OnNewSlotParams
+    onsp =
+        defaultOnNewSlotParams
+        {onspTerminationPolicy = NewSlotTerminationPolicy "block creator"}
 
 blockCreator
     :: BlockWorkMode ctx m
@@ -374,7 +374,7 @@ chainQualityChecker curSlot kThSlot = do
 
 -- Monitor for chain quality for last k blocks.
 cqkMetricMonitor ::
-       HasConfiguration
+       (HasBlockConfiguration, HasConfiguration)
     => MetricMonitorState Double
     -> Bool
     -> MetricMonitor Double
@@ -414,7 +414,10 @@ cqOverallMetricMonitor = noReportMonitor convertCQ (Just debugFormat)
   where
     debugFormat = "Overall chain quality is " %cqF
 
-cqFixedMetricMonitor :: HasConfiguration => MetricMonitorState Double -> MetricMonitor Double
+cqFixedMetricMonitor ::
+       HasBlockConfiguration
+    => MetricMonitorState Double
+    -> MetricMonitor Double
 cqFixedMetricMonitor = noReportMonitor convertCQ (Just debugFormat)
   where
     debugFormat =

@@ -1,29 +1,41 @@
+{-# LANGUAGE TupleSections #-}
+
 -- | Wallet unit tests
 --
 -- TODO: Take advantage of https://github.com/input-output-hk/cardano-sl/pull/2296 ?
-{-# LANGUAGE NoMonomorphismRestriction #-}
 module Main (main) where
 
-import Universum
-import Formatting (sformat, bprint, build, (%), shown)
-import Test.Hspec
-import Test.Hspec.QuickCheck
-import Test.QuickCheck
-import Prelude (Show(..))
-import qualified Data.Text.Buildable
 import qualified Data.Set as Set
+import qualified Data.Text.Buildable
+import           Formatting (bprint, build, sformat, shown, (%))
+import           Serokell.Util (mapJson)
+import           Test.Hspec.QuickCheck
+import           Universum
 
-import Pos.Util.Chrono
 import qualified Pos.Block.Error as Cardano
-import qualified Pos.Txp.Toil    as Cardano
-import Serokell.Util (mapJson)
+import qualified Pos.Txp.Toil as Cardano
+import           Pos.Util.Chrono
 
-import UTxO.Bootstrap
-import UTxO.Context
-import UTxO.DSL
-import UTxO.Interpreter
-import UTxO.PreChain
-import UTxO.Translate
+import qualified Cardano.Wallet.Kernel as Kernel
+import qualified Cardano.Wallet.Kernel.Diffusion as Kernel
+
+import           UTxO.BlockGen
+import           UTxO.Bootstrap
+import           UTxO.Context
+import           UTxO.DSL
+import           UTxO.Interpreter
+import           UTxO.PreChain
+import           UTxO.Translate
+
+import           Util.Buildable.Hspec
+import           Util.Buildable.QuickCheck
+import           Util.Validated
+import           Wallet.Abstract
+-- import qualified Wallet.Full as Full
+import qualified Wallet.Incremental as Incr
+import qualified Wallet.Prefiltered as Pref
+import qualified Wallet.Rollback as Roll
+import qualified Wallet.Spec as Spec
 
 {-------------------------------------------------------------------------------
   Main test driver
@@ -50,67 +62,154 @@ _showContext = do
 
 tests :: Spec
 tests = describe "Wallet unit tests" $ do
-    testSanityChecks
-    quickcheckSanityChecks
-
-testSanityChecks :: Spec
-testSanityChecks = describe "Test sanity checks" $ do
-    it "can construct and verify empty block" $
-      intAndVerifyPure emptyBlock `shouldSatisfy` expectValid
-
-    it "can construct and verify block with one transaction" $
-      intAndVerifyPure oneTrans `shouldSatisfy` expectValid
-
-    it "can construct and verify example 1 from the UTxO paper" $
-      intAndVerifyPure example1 `shouldSatisfy` expectValid
-
-    it "can reject overspending" $
-      intAndVerifyPure overspend `shouldSatisfy` expectInvalid
-
-    it "can reject double spending" $
-      intAndVerifyPure doublespend `shouldSatisfy` expectInvalid
-
-quickcheckSanityChecks :: Spec
-quickcheckSanityChecks = describe "QuickCheck sanity checks" $ do
-    prop "can construct and verify block with one arbitrary transaction" $
-      expectValid <$> intAndVerifyGen genOneTrans
+    testTranslation
+    testPureWallet
+    testPassiveWallet
+    testActiveWallet
 
 {-------------------------------------------------------------------------------
-  Example QuickCheck generated chains
+  UTxO->Cardano translation tests
 -------------------------------------------------------------------------------}
 
--- | Chain with a single transaction that transfers an arbitrary amount from
--- the first rich actor to the second.
-genOneTrans :: Hash h Addr => PreChain h Gen
-genOneTrans = PreChain $ \boot -> do
-    -- TODO: The actual range we can use here is @(0, initR0 - fee)@ where
-    -- @fee@ is the fee of the transaction. Sadly, however, we don't know
-    -- this fee in advantage. Hence, any QuickCheck generators for transactions
-    -- will need to be a little bit conversative (possibly using some kind of
-    -- @maxFee@ upper bound).
-    value <- choose (0, 1000)
-    return $ \((fee : _) : _) ->
-      let t1 = Transaction {
-                   trFresh = 0
-                 , trFee   = fee
-                 , trHash  = 1
-                 , trIns   = Set.fromList [ Input (hash boot) 0 ] -- rich 0
-                 , trOuts  = [ Output r1 value
-                             , Output r0 (initR0 - value - fee)
-                             ]
-                 }
-      in OldestFirst [OldestFirst [t1]]
+testTranslation :: Spec
+testTranslation = do
+    describe "Translation sanity checks" $ do
+      it "can construct and verify empty block" $
+        intAndVerifyPure emptyBlock `shouldSatisfy` expectValid
+
+      it "can construct and verify block with one transaction" $
+        intAndVerifyPure oneTrans `shouldSatisfy` expectValid
+
+      it "can construct and verify example 1 from the UTxO paper" $
+        intAndVerifyPure example1 `shouldSatisfy` expectValid
+
+      it "can reject overspending" $
+        intAndVerifyPure overspend `shouldSatisfy` expectInvalid
+
+      it "can reject double spending" $
+        intAndVerifyPure doublespend `shouldSatisfy` expectInvalid
+
+    describe "Translation QuickCheck tests" $ do
+      prop "can translate randomly generated chains" $
+        forAll
+          (intAndVerifyGen genValidBlockchain)
+          expectValid
+
+{-------------------------------------------------------------------------------
+  Pure wallet tests
+-------------------------------------------------------------------------------}
+
+testPureWallet :: Spec
+testPureWallet = do
+    it "Test pure wallets" $
+      forAll genInductive $ \ind -> conjoin [
+          checkInvariants "spec"      ind specEmpty
+        , checkInvariants "incr"      ind incrEmpty
+        , checkInvariants "roll"      ind rollEmpty
+        , checkInvariants "pref"      ind prefEmpty
+        , checkEquivalent "spec/incr" ind specEmpty incrEmpty
+        , checkEquivalent "spec/roll" ind specEmpty rollEmpty
+        , checkEquivalent "spec/pref" ind specEmpty prefEmpty
+        ]
+  where
+    transCtxt = runTranslateNoErrors ask
+
+    genInductive :: Hash h Addr => Gen (InductiveWithOurs h Addr)
+    genInductive = do
+      fpc <- runTranslateT $ fromPreChain genValidBlockchain
+      n <- choose
+        ( 1
+        , length . filter (not . isAvvmAddr) . toList
+        . ledgerAddresses $ fpcLedger fpc
+        )
+      genFromBlockchainPickingAccounts n fpc
+
+    checkInvariants :: (IsWallet w h a, Buildable a)
+                    => Text
+                    -> InductiveWithOurs h a
+                    -> (Set a -> Transaction h a -> w h a)
+                    -> Expectation
+    checkInvariants label (InductiveWithOurs addrs ind) w =
+        shouldBeValidated $
+          walletInvariants label (w addrs) ind
+
+    checkEquivalent :: (IsWallet w h a, IsWallet w' h a, Buildable a)
+                    => Text
+                    -> InductiveWithOurs h a
+                    -> (Set a -> Transaction h a -> w  h a)
+                    -> (Set a -> Transaction h a -> w' h a)
+                    -> Expectation
+    checkEquivalent label (InductiveWithOurs addrs ind) w w' =
+        shouldBeValidated $
+          walletEquivalent label (w addrs) (w' addrs) ind
+
+    specEmpty :: Set Addr -> Transaction GivenHash Addr -> Spec.Wallet GivenHash Addr
+    specEmpty = walletBoot Spec.walletEmpty . oursFromSet
+
+    incrEmpty :: Set Addr -> Transaction GivenHash Addr -> Incr.Wallet GivenHash Addr
+    incrEmpty = walletBoot Incr.walletEmpty . oursFromSet
+
+    rollEmpty :: Set Addr -> Transaction GivenHash Addr -> Roll.Wallet GivenHash Addr
+    rollEmpty = walletBoot Roll.walletEmpty . oursFromSet
+
+    prefEmpty :: Set Addr -> Transaction GivenHash Addr -> Pref.Wallet GivenHash Addr
+    prefEmpty = walletBoot Pref.walletEmpty . oursFromSet
+
+    oursFromSet :: Set Addr -> Ours Addr
+    oursFromSet addrs addr = do
+        guard (Set.member addr addrs)
+        return $ fst (resolveAddr addr transCtxt)
+
+{-------------------------------------------------------------------------------
+  Passive wallet tests
+-------------------------------------------------------------------------------}
+
+testPassiveWallet  :: Spec
+testPassiveWallet = around bracketPassiveWallet $
+    describe "Passive wallet sanity checks" $ do
+      it "can be initialized" $ \w ->
+        Kernel.init w
+
+-- | Initialize passive wallet in a manner suitable for the unit tests
+bracketPassiveWallet :: (Kernel.PassiveWallet -> IO a) -> IO a
+bracketPassiveWallet = Kernel.bracketPassiveWallet logMessage
+  where
+   -- TODO: Decide what to do with logging
+    logMessage _sev _txt = return ()
+
+{-------------------------------------------------------------------------------
+  Active wallet tests
+-------------------------------------------------------------------------------}
+
+testActiveWallet :: Spec
+testActiveWallet = around bracketWallet $
+    describe "Active wallet sanity checks" $ do
+      it "initially has no pending transactions" $ \w ->
+        Kernel.hasPending w `shouldReturn` False
+
+-- | Initialize active wallet in a manner suitable for unit testing
+bracketWallet :: (Kernel.ActiveWallet -> IO a) -> IO a
+bracketWallet test =
+    bracketPassiveWallet $ \passive ->
+      Kernel.bracketActiveWallet passive diffusion $ \active ->
+        test active
+  where
+    -- TODO: Decide what we want to do with submitted transactions
+    diffusion :: Kernel.WalletDiffusion
+    diffusion =  Kernel.WalletDiffusion {
+          walletSendTx = \_tx -> return False
+        }
 
 {-------------------------------------------------------------------------------
   Example hand-constructed chains
 -------------------------------------------------------------------------------}
 
-emptyBlock :: Hash h Addr => PreChain h Identity
-emptyBlock = PreChain $ \_boot -> return $ \_fees ->
+emptyBlock :: Hash h Addr => PreChain h Identity ()
+emptyBlock = preChain $ \_boot -> return $ \_fees ->
     OldestFirst [OldestFirst []]
 
-oneTrans :: Hash h Addr => PreChain h Identity
-oneTrans = PreChain $ \boot -> return $ \((fee : _) : _) ->
+oneTrans :: Hash h Addr => PreChain h Identity ()
+oneTrans = preChain $ \boot -> return $ \((fee : _) : _) ->
     let t1 = Transaction {
                  trFresh = 0
                , trFee   = fee
@@ -119,12 +218,13 @@ oneTrans = PreChain $ \boot -> return $ \((fee : _) : _) ->
                , trOuts  = [ Output r1 1000
                            , Output r0 (initR0 - 1000 - fee)
                            ]
+               , trExtra = ["t1"]
                }
     in OldestFirst [OldestFirst [t1]]
 
 -- Try to transfer from R0 to R1, but leaving R0's balance the same
-overspend :: Hash h Addr => PreChain h Identity
-overspend = PreChain $ \boot -> return $ \((fee : _) : _) ->
+overspend :: Hash h Addr => PreChain h Identity ()
+overspend = preChain $ \boot -> return $ \((fee : _) : _) ->
     let t1 = Transaction {
                  trFresh = 0
                , trFee   = fee
@@ -133,6 +233,7 @@ overspend = PreChain $ \boot -> return $ \((fee : _) : _) ->
                , trOuts  = [ Output r1 1000
                            , Output r0 initR0
                            ]
+               , trExtra = ["t1"]
                }
     in OldestFirst [OldestFirst [t1]]
 
@@ -140,8 +241,8 @@ overspend = PreChain $ \boot -> return $ \((fee : _) : _) ->
 -- TODO: in principle this example /ought/ to work without any kind of
 -- outputs at all; but in practice this breaks stuff because now we have
 -- two identical transactions which would therefore get identical IDs?
-doublespend :: Hash h Addr => PreChain h Identity
-doublespend = PreChain $ \boot -> return $ \((fee1 : fee2 : _) : _) ->
+doublespend :: Hash h Addr => PreChain h Identity ()
+doublespend = preChain $ \boot -> return $ \((fee1 : fee2 : _) : _) ->
     let t1 = Transaction {
                  trFresh = 0
                , trFee   = fee1
@@ -150,6 +251,7 @@ doublespend = PreChain $ \boot -> return $ \((fee1 : fee2 : _) : _) ->
                , trOuts  = [ Output r1 1000
                            , Output r0 (initR0 - 1000 - fee1)
                            ]
+               , trExtra = ["t1"]
                }
         t2 = Transaction {
                  trFresh = 0
@@ -159,6 +261,7 @@ doublespend = PreChain $ \boot -> return $ \((fee1 : fee2 : _) : _) ->
                , trOuts  = [ Output r2 1000
                            , Output r0 (initR0 - 1000 - fee2)
                            ]
+               , trExtra = ["t2"]
                }
     in OldestFirst [OldestFirst [t1, t2]]
 
@@ -175,8 +278,8 @@ doublespend = PreChain $ \boot -> return $ \((fee1 : fee2 : _) : _) ->
 -- Transaction 5 in example 1 is a transaction /from/ the treasury /to/ an
 -- ordinary address. This currently has no equivalent in Cardano, so we omit
 -- it.
-example1 :: Hash h Addr => PreChain h Identity
-example1 = PreChain $ \boot -> return $ \((fee3 : fee4 : _) : _) ->
+example1 :: Hash h Addr => PreChain h Identity ()
+example1 = preChain $ \boot -> return $ \((fee3 : fee4 : _) : _) ->
     let t3 = Transaction {
                  trFresh = 0
                , trFee   = fee3
@@ -185,6 +288,7 @@ example1 = PreChain $ \boot -> return $ \((fee3 : fee4 : _) : _) ->
                , trOuts  = [ Output r1 1000
                            , Output r0 (initR0 - 1000 - fee3)
                            ]
+               , trExtra = ["t3"]
                }
         t4 = Transaction {
                  trFresh = 0
@@ -192,6 +296,7 @@ example1 = PreChain $ \boot -> return $ \((fee3 : fee4 : _) : _) ->
                , trHash  = 4
                , trIns   = Set.fromList [ Input (hash t3) 1 ]
                , trOuts  = [ Output r2 (initR0 - 1000 - fee3 - fee4) ]
+               , trExtra = ["t4"]
                }
     in OldestFirst [OldestFirst [t3, t4]]
 
@@ -214,53 +319,73 @@ r2 = Addr (IxRich 2) 0
   Verify chain
 -------------------------------------------------------------------------------}
 
-intAndVerifyPure :: PreChain GivenHash Identity -> ValidationResult
+intAndVerifyPure :: PreChain GivenHash Identity a
+                 -> ValidationResult GivenHash Addr
 intAndVerifyPure = runIdentity . intAndVerify
 
-intAndVerifyGen :: PreChain GivenHash Gen -> Gen ValidationResult
+intAndVerifyGen :: PreChain GivenHash Gen a
+                -> Gen (ValidationResult GivenHash Addr)
 intAndVerifyGen = intAndVerify
 
 -- | Interpret and verify a chain, given the bootstrap transactions
 intAndVerify :: (Hash h Addr, Monad m)
-             => PreChain h m -> m ValidationResult
-intAndVerify pc = runTranslateT $ do
+             => PreChain h m a -> m (ValidationResult h Addr)
+intAndVerify = intAndVerifyChain
+
+-- | Interpret and verify a chain, given the bootstrap transactions. Also
+-- returns the 'FromPreChain' value, which contains the blockchain, ledger,
+-- boot transaction, etc.
+intAndVerifyChain :: (Hash h Addr, Monad m)
+                  => PreChain h m a
+                  -> m (ValidationResult h Addr)
+intAndVerifyChain pc = runTranslateT $ do
     FromPreChain{..} <- fromPreChain pc
     let dslIsValid = ledgerIsValid fpcLedger
         dslUtxo    = ledgerUtxo    fpcLedger
     intResult <- catchTranslateErrors $ runIntBoot fpcBoot fpcChain
     case intResult of
       Left e ->
-        if dslIsValid
-          then return $ Disagreement (UnexpectedError e)
-          else return $ ExpectedInvalid (Right e)
+        case dslIsValid of
+          Valid     () -> return $ Disagreement fpcLedger (UnexpectedError e)
+          Invalid _ e' -> return $ ExpectedInvalid' e' e
       Right (chain', ctxt) -> do
         let chain'' = fromMaybe (error "intAndVerify: Nothing")
                     $ nonEmptyOldestFirst chain'
         isCardanoValid <- verifyBlocksPrefix chain''
         case (dslIsValid, isCardanoValid) of
-          (False, Left e)  -> return $ ExpectedInvalid (Left e)
-          (False, Right _) -> return $ Disagreement UnexpectedValid
-          (True,  Left e)  -> return $ Disagreement (UnexpectedInvalid e)
-          (True,  Right (_undo, utxo)) -> do
-            (utxo', _) <- runIntT ctxt dslUtxo
-            if utxo == utxo'
+          (Invalid _ e' , Invalid _ e) -> return $ ExpectedInvalid e' e
+          (Invalid _ e' , Valid     _) -> return $ Disagreement fpcLedger (UnexpectedValid e')
+          (Valid     () , Invalid _ e) -> return $ Disagreement fpcLedger (UnexpectedInvalid e)
+          (Valid     () , Valid (_undo, finalUtxo)) -> do
+            (finalUtxo', _) <- runIntT ctxt dslUtxo
+            if finalUtxo == finalUtxo'
               then return $ ExpectedValid
-              else return $ Disagreement (UnexpectedUtxo dslUtxo utxo utxo')
+              else return $ Disagreement fpcLedger UnexpectedUtxo {
+                         utxoDsl     = dslUtxo
+                       , utxoCardano = finalUtxo
+                       , utxoInt     = finalUtxo'
+                       }
 
 {-------------------------------------------------------------------------------
   Chain verification test result
 -------------------------------------------------------------------------------}
 
-data ValidationResult =
+data ValidationResult h a =
     -- | We expected the chain to be valid; DSL and Cardano both agree
     ExpectedValid
 
     -- | We expected the chain to be invalid; DSL and Cardano both agree
-    --
-    -- We record the error message we get from Cardano (the DSL just reports
-    -- true or false). Note that some invalid chains cannot even be constructed
-    -- (for example, when we try to overspend).
-  | ExpectedInvalid (Either Cardano.VerifyBlocksException IntException)
+  | ExpectedInvalid {
+        validationErrorDsl     :: Text
+      , validationErrorCardano :: Cardano.VerifyBlocksException
+      }
+
+    -- | Variation on 'ExpectedInvalid', where we cannot even /construct/
+    -- the Cardano chain, much less validate it.
+  | ExpectedInvalid' {
+        validationErrorDsl :: Text
+      , validationErrorInt :: IntException
+      }
 
     -- | Disagreement between the DSL and Cardano
     --
@@ -272,15 +397,18 @@ data ValidationResult =
     -- * There is a bug in the Cardano implementation
     --
     -- We record the error message from Cardano, if Cardano thought the chain
-    -- was invalid
-  | Disagreement Disagreement
+    -- was invalid, as well as the ledger that causes the problem.
+  | Disagreement {
+        validationLedger       :: Ledger h a
+      , validationDisagreement :: Disagreement h a
+      }
 
 -- | Disagreement between Cardano and the DSL
 --
 -- We consider something to be "unexpectedly foo" when Cardano says it's
 -- " foo " but the DSL says it's " not foo "; the DSL is the spec, after all
 -- (of course that doesn't mean that it cannot contain bugs :).
-data Disagreement =
+data Disagreement h a =
     -- | Cardano reported the chain as invalid, but the DSL reported it as
     -- valid. We record the error message from Cardano.
     UnexpectedInvalid Cardano.VerifyBlocksException
@@ -291,44 +419,59 @@ data Disagreement =
 
     -- | Cardano reported the chain as valid, but the DSL reported it as
     -- invalid.
-  | UnexpectedValid
+  | UnexpectedValid Text
 
     -- | Both Cardano and the DSL reported the chain as valid, but they computed
     -- a different UTxO
-  | forall h. Hash h Addr => UnexpectedUtxo {
-        utxoDsl     :: Utxo h Addr
+  | UnexpectedUtxo {
+        utxoDsl     :: Utxo h a
       , utxoCardano :: Cardano.Utxo
       , utxoInt     :: Cardano.Utxo
       }
 
-expectValid :: ValidationResult -> Bool
+expectValid :: ValidationResult h a -> Bool
 expectValid ExpectedValid = True
 expectValid _otherwise    = False
 
-expectInvalid :: ValidationResult -> Bool
-expectInvalid (ExpectedInvalid _) = True
-expectInvalid _otherwise          = False
+expectInvalid :: ValidationResult h a -> Bool
+expectInvalid (ExpectedInvalid _ _) = True
+expectInvalid _otherwise            = False
 
 {-------------------------------------------------------------------------------
   Pretty-printing
 -------------------------------------------------------------------------------}
 
-instance Show ValidationResult where
-  show = toString . pretty
+instance (Hash h a, Buildable a) => Buildable (ValidationResult h a) where
+  build ExpectedValid = "ExpectedValid"
+  build ExpectedInvalid{..} = bprint
+      ( "ExpectedInvalid"
+      % ", errorDsl:     " % build
+      % ", errorCardano: " % build
+      % "}"
+      )
+      validationErrorDsl
+      validationErrorCardano
+  build ExpectedInvalid'{..} = bprint
+      ( "ExpectedInvalid'"
+      % ", errorDsl: " % build
+      % ", errorInt: " % build
+      % "}"
+      )
+      validationErrorDsl
+      validationErrorInt
+  build Disagreement{..} = bprint
+      ( "Disagreement "
+      % "{ ledger: "       % build
+      % ", disagreement: " % build
+      % "}"
+      )
+      validationLedger
+      validationDisagreement
 
-instance Show Disagreement where
-  show = toString . pretty
-
-instance Buildable ValidationResult where
-  build ExpectedValid               = "ExpectedValid"
-  build (ExpectedInvalid (Left e))  = bprint ("ExpectedInvalid " % build) e
-  build (ExpectedInvalid (Right e)) = bprint ("ExpectedInvalid " % shown) e
-  build (Disagreement d)            = bprint ("Disagreement " % build) d
-
-instance Buildable Disagreement where
+instance (Hash h a, Buildable a) => Buildable (Disagreement h a) where
   build (UnexpectedInvalid e) = bprint ("UnexpectedInvalid " % build) e
   build (UnexpectedError e)   = bprint ("UnexpectedError " % shown) e
-  build UnexpectedValid       = "UnexpectedValid"
+  build (UnexpectedValid e)   = bprint ("UnexpectedValid " % shown) e
   build UnexpectedUtxo{..}    = bprint
       ( "UnexpectedUtxo"
       % "{ dsl:     " % build

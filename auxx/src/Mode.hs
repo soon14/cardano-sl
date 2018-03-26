@@ -4,27 +4,28 @@
 
 module Mode
        (
-         -- * Extra types
-         CmdCtx (..)
-
        -- * Mode, context, etc.
-       , AuxxContext (..)
+         AuxxContext (..)
        , AuxxMode
        , MonadAuxxMode
 
        -- * Helpers
-       , getCmdCtx
        , isTempDbUsed
        , realModeToAuxx
        , makePubKeyAddressAuxx
        , deriveHDAddressAuxx
+
+       -- * Specialisations of utils
+       , getOwnUtxos
+       , getBalance
        ) where
 
 import           Universum
 
 import           Control.Lens (lens, makeLensesWith)
-import           Control.Monad.Morph (hoist)
 import           Control.Monad.Reader (withReaderT)
+import           Control.Monad.Trans.Resource (transResourceT)
+import           Data.Conduit (transPipe)
 import           Data.Default (def)
 import           Mockable (Production)
 import           System.Wlog (HasLoggerName (..))
@@ -34,22 +35,20 @@ import           Pos.Block.Slog (HasSlogContext (..), HasSlogGState (..))
 import           Pos.Client.KeyStorage (MonadKeys (..), MonadKeysRead (..), getSecretDefault,
                                         modifySecretDefault)
 import           Pos.Client.Txp.Addresses (MonadAddresses (..))
-import           Pos.Client.Txp.Balances (MonadBalances (..), getBalanceFromUtxo,
+import           Pos.Client.Txp.Balances (MonadBalances(..), getBalanceFromUtxo,
                                           getOwnUtxosGenesis)
 import           Pos.Client.Txp.History (MonadTxHistory (..), getBlockHistoryDefault,
                                          getLocalHistoryDefault, saveTxDefault)
-import           Pos.Communication (NodeId)
 import           Pos.Communication.Limits (HasAdoptedBlockVersionData (..))
 import           Pos.Context (HasNodeContext (..))
-import           Pos.Core (Address, HasConfiguration, HasPrimaryKey (..), IsBootstrapEraAddr (..),
-                           deriveFirstHDAddress, largestPubKeyAddressBoot,
+import           Pos.Core (Address, HasConfiguration, HasPrimaryKey (..),
+                           IsBootstrapEraAddr (..), deriveFirstHDAddress, largestPubKeyAddressBoot,
                            largestPubKeyAddressSingleKey, makePubKeyAddress, siEpoch)
 import           Pos.Crypto (EncryptedSecretKey, PublicKey, emptyPassphrase)
 import           Pos.DB (DBSum (..), MonadGState (..), NodeDBs, gsIsBootstrapEra)
 import           Pos.DB.Class (MonadDB (..), MonadDBRead (..))
 import           Pos.Generator.Block (BlockGenMode)
 import           Pos.GState (HasGStateContext (..), getGStateImplicit)
-import           Pos.Infra.Configuration (HasInfraConfiguration)
 import           Pos.KnownPeers (MonadFormatPeers (..))
 import           Pos.Launcher (HasConfigurations)
 import           Pos.Network.Types (HasNodeType (..), NodeType (..))
@@ -59,8 +58,8 @@ import           Pos.Slotting.Class (MonadSlots (..))
 import           Pos.Slotting.MemState (HasSlottingVar (..), MonadSlotsData)
 import           Pos.Ssc.Configuration (HasSscConfiguration)
 import           Pos.Ssc.Types (HasSscContext (..))
-import           Pos.Txp (MempoolExt, MonadTxpLocal (..), txNormalize, txProcessTransaction,
-                          txProcessTransactionNoLock)
+import           Pos.Txp (HasTxpConfiguration, MempoolExt, MonadTxpLocal (..), txNormalize,
+                          txProcessTransaction, txProcessTransactionNoLock)
 import           Pos.Txp.DB.Utxo (getFilteredUtxo)
 import           Pos.Util (HasLens (..), postfixLFields)
 import           Pos.Util.CompileInfo (HasCompileInfo, withCompileInfo)
@@ -70,11 +69,6 @@ import           Pos.Util.TimeWarp (CanJsonLog (..))
 import           Pos.Util.UserSecret (HasUserSecret (..))
 import           Pos.WorkMode (EmptyMempoolExt, RealMode, RealModeContext (..))
 
--- | Command execution context.
-data CmdCtx = CmdCtx
-    { ccPeers :: ![NodeId]
-    }
-
 type AuxxMode = ReaderT AuxxContext Production
 
 class (m ~ AuxxMode, HasConfigurations, HasCompileInfo) => MonadAuxxMode m
@@ -82,7 +76,6 @@ instance (HasConfigurations, HasCompileInfo) => MonadAuxxMode AuxxMode
 
 data AuxxContext = AuxxContext
     { acRealModeContext :: !(RealModeContext EmptyMempoolExt)
-    , acCmdCtx          :: !CmdCtx
     , acTempDbUsed      :: !Bool
     }
 
@@ -91,10 +84,6 @@ makeLensesWith postfixLFields ''AuxxContext
 ----------------------------------------------------------------------------
 -- Helpers
 ----------------------------------------------------------------------------
-
--- | Get 'CmdCtx' in 'AuxxMode'.
-getCmdCtx :: MonadAuxxMode m => m CmdCtx
-getCmdCtx = view acCmdCtx_L
 
 isTempDbUsed :: AuxxMode Bool
 isTempDbUsed = view acTempDbUsed_L
@@ -161,7 +150,7 @@ instance HasSlogGState AuxxContext where
 instance HasJsonLogConfig AuxxContext where
     jsonLogConfig = acRealModeContext_L . jsonLogConfig
 
-instance (HasConfiguration, HasInfraConfiguration, MonadSlotsData ctx AuxxMode)
+instance (HasConfiguration, MonadSlotsData ctx AuxxMode)
       => MonadSlots ctx AuxxMode
   where
     getCurrentSlot = realModeToAuxx getCurrentSlot
@@ -182,7 +171,8 @@ instance {-# OVERLAPPING #-} CanJsonLog AuxxMode where
 
 instance HasConfiguration => MonadDBRead AuxxMode where
     dbGet = realModeToAuxx ... dbGet
-    dbIterSource tag p = hoist (hoist realModeToAuxx) (dbIterSource tag p)
+    dbIterSource tag p =
+        transPipe (transResourceT realModeToAuxx) (dbIterSource tag p)
     dbGetSerBlock = realModeToAuxx ... dbGetSerBlock
     dbGetSerUndo = realModeToAuxx ... dbGetSerUndo
 
@@ -190,7 +180,7 @@ instance HasConfiguration => MonadDB AuxxMode where
     dbPut = realModeToAuxx ... dbPut
     dbWriteBatch = realModeToAuxx ... dbWriteBatch
     dbDelete = realModeToAuxx ... dbDelete
-    dbPutSerBlund = realModeToAuxx ... dbPutSerBlund
+    dbPutSerBlunds = realModeToAuxx ... dbPutSerBlunds
 
 instance HasConfiguration => MonadGState AuxxMode where
     gsAdoptedBVData = realModeToAuxx ... gsAdoptedBVData
@@ -206,7 +196,11 @@ instance HasConfiguration => MonadBalances AuxxMode where
     getOwnUtxos addrs = ifM isTempDbUsed (getOwnUtxosGenesis addrs) (getFilteredUtxo addrs)
     getBalance = getBalanceFromUtxo
 
-instance (HasConfiguration, HasInfraConfiguration, HasSscConfiguration, HasCompileInfo) =>
+instance ( HasConfiguration
+         , HasSscConfiguration
+         , HasTxpConfiguration
+         , HasCompileInfo
+         ) =>
          MonadTxHistory AuxxMode where
     getBlockHistory = getBlockHistoryDefault
     getLocalHistory = getLocalHistoryDefault
@@ -233,7 +227,11 @@ instance MonadKeys AuxxMode where
 
 type instance MempoolExt AuxxMode = EmptyMempoolExt
 
-instance (HasConfiguration, HasInfraConfiguration, HasCompileInfo) => MonadTxpLocal AuxxMode where
+instance ( HasConfiguration
+         , HasTxpConfiguration
+         , HasCompileInfo
+         ) =>
+         MonadTxpLocal AuxxMode where
     txpNormalize = withReaderT acRealModeContext txNormalize
     txpProcessTx = withReaderT acRealModeContext . txProcessTransaction
 

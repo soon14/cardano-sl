@@ -1,5 +1,5 @@
 name:                cardano-sl-ssc
-version:             1.0.3
+version:             1.1.0
 synopsis:            Cardano SL - shared seed computation
 description:         Cardano SL - shared seed computation
 license:             MIT
@@ -9,6 +9,7 @@ maintainer:          hi@serokell.io
 copyright:           2016 IOHK
 category:            Currency
 build-type:          Simple
+extra-source-files:  README.md
 cabal-version:       >=1.10
 
 library
@@ -84,7 +85,6 @@ library
                      , ether
                      , ekg-core
                      , exceptions
-                     , safe-exceptions
                      , formatting
                      , generic-arbitrary
                      , lens

@@ -16,7 +16,7 @@ data DynamicTimer m = DynamicTimer
   }
 
 -- | Construct new `DynamicTimer` from an action that returns time interval
-newDynamicTimer :: MonadIO m => m Microsecond -> m (DynamicTimer m)
+newDynamicTimer :: (MonadIO m, MonadIO d) => m Microsecond -> d (DynamicTimer m)
 newDynamicTimer dtDuration =
   DynamicTimer dtDuration <$> (newTVarIO True >>= newTVarIO)
 

@@ -64,7 +64,7 @@ import           Pos.Lrc (LrcContext)
 import           Pos.Network.Types (HasNodeType (..), NodeType (..))
 import           Pos.Reporting (HasReportingContext (..))
 import           Pos.Shutdown (HasShutdownContext (..), ShutdownContext (..))
-import           Pos.Slotting (HasSlottingVar (..), MonadSlots (..), MonadSlotsData)
+import           Pos.Slotting (HasSlottingVar (..), MonadSlots (..), MonadSlotsData, SimpleSlottingStateVar, mkSimpleSlottingStateVar)
 import           Pos.Ssc.Configuration (HasSscConfiguration)
 import           Pos.Ssc.Mem (SscMemTag)
 import           Pos.Ssc.Types (SscState)
@@ -90,7 +90,7 @@ import           Pos.Wallet.WalletMode (MonadBlockchainInfo (..), MonadUpdates (
 import           Pos.Wallet.Web.ClientTypes (AccountId)
 import           Pos.Wallet.Web.Methods (AddrCIdHashes (..))
 import           Pos.Wallet.Web.Mode (getBalanceDefault, getNewAddressWebWallet, getOwnUtxosDefault)
-import           Pos.Wallet.Web.State (MonadWalletDB, WalletState, openMemState)
+import           Pos.Wallet.Web.State (WalletDbReader, WalletDB, openMemState)
 import           Pos.Wallet.Web.Tracking.BListener (onApplyBlocksWebWallet,
                                                     onRollbackBlocksWebWallet)
 
@@ -136,7 +136,7 @@ instance Show WalletTestParams where
 
 data WalletTestContext = WalletTestContext
     { wtcBlockTestContext :: !BlockTestContext
-    , wtcWalletState      :: !WalletState
+    , wtcWalletState      :: !WalletDB
     , wtcUserSecret       :: !(TVar UserSecret)
     -- ^ Secret keys which are used to send transactions
     , wtcRecoveryHeader   :: !RecoveryHeader
@@ -153,6 +153,8 @@ data WalletTestContext = WalletTestContext
     -- ^ Sent transactions via MonadWalletSendActions
     , wtcHashes           :: !AddrCIdHashes
     -- ^ Address hashes ref
+    , wtcSlottingStateVar  :: SimpleSlottingStateVar
+    -- ^ A mutable cell with SlotId
     }
 
 makeLensesWith postfixLFields ''WalletTestContext
@@ -189,6 +191,7 @@ initWalletTestContext WalletTestParams {..} callback =
             wtcLastKnownHeader <- STM.newTVarIO Nothing
             wtcSentTxs <- STM.newTVarIO mempty
             wtcHashes <- AddrCIdHashes <$> newIORef mempty
+            wtcSlottingStateVar <- mkSimpleSlottingStateVar
             pure WalletTestContext {..}
         callback wtc
 
@@ -300,6 +303,9 @@ instance HasLoggerName' WalletTestContext where
 instance HasLens TxpHolderTag WalletTestContext (GenericTxpLocalData WalletMempoolExt) where
     lensOf = wtcBlockTestContext_L . btcTxpMemL
 
+instance HasLens SimpleSlottingStateVar WalletTestContext SimpleSlottingStateVar where
+    lensOf = wtcSlottingStateVar_L
+
 instance {-# OVERLAPPING #-} HasLoggerName WalletTestMode where
     askLoggerName = askLoggerNameDefault
     modifyLoggerName = modifyLoggerNameDefault
@@ -314,7 +320,7 @@ instance HasConfiguration => MonadDB WalletTestMode where
     dbPut = DB.dbPutPureDefault
     dbWriteBatch = DB.dbWriteBatchPureDefault
     dbDelete = DB.dbDeletePureDefault
-    dbPutSerBlund = DB.dbPutSerBlundPureDefault
+    dbPutSerBlunds = DB.dbPutSerBlundsPureDefault
 
 instance HasConfiguration => MonadGState WalletTestMode where
     gsAdoptedBVData = gsAdoptedBVDataDefault
@@ -329,7 +335,7 @@ instance MonadKnownPeers WalletTestMode where
 -- Wallet instances
 ----------------------------------------------------------------------------
 
-instance HasLens WalletState WalletTestContext WalletState where
+instance HasLens WalletDB WalletTestContext WalletDB where
     lensOf = wtcWalletState_L
 
 -- For MonadUpdates
@@ -365,7 +371,7 @@ instance HasLens StateLockMetrics WalletTestContext StateLockMetrics where
             , slmRelease = const $ const $ pure ()
             }
 
-instance HasConfigurations => MonadWalletDB WalletTestContext WalletTestMode
+instance HasConfigurations => WalletDbReader WalletTestContext WalletTestMode
 
 -- TODO remove HasCompileInfo here
 -- when getNewAddressWebWallet won't require MonadWalletWebMode

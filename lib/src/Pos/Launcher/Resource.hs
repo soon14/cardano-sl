@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP            #-}
+{-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE Rank2Types     #-}
 {-# LANGUAGE TypeOperators  #-}
-{-# LANGUAGE KindSignatures #-}
 
 -- | Resources used by node and ways to deal with them.
 
@@ -27,11 +27,12 @@ import           Formatting (sformat, shown, (%))
 import           Mockable (Production (..))
 import           System.IO (BufferMode (..), Handle, hClose, hSetBuffering)
 import qualified System.Metrics as Metrics
-import           System.Wlog (LoggerConfig (..), WithLogger, consoleActionB,
-                              defaultHandleAction, logDebug, logInfo, maybeLogsDirB,
-                              productionB, removeAllHandlers, setupLogging, showTidB)
+import           System.Wlog (LoggerConfig (..), WithLogger, consoleActionB, defaultHandleAction,
+                              logDebug, logInfo, maybeLogsDirB, productionB, removeAllHandlers,
+                              setupLogging, showTidB)
 
 import           Pos.Binary ()
+import           Pos.Block.Configuration (HasBlockConfiguration)
 import           Pos.Block.Slog (mkSlogContext)
 import           Pos.Client.CLI.Util (readLoggerConfig)
 import           Pos.Configuration
@@ -42,13 +43,12 @@ import           Pos.DB.Rocks (closeNodeDBs, openNodeDBs)
 import           Pos.Delegation (DelegationVar, HasDlgConfiguration, mkDelegationVar)
 import           Pos.DHT.Real (KademliaParams (..))
 import qualified Pos.GState as GS
-import           Pos.Infra.Configuration (HasInfraConfiguration)
 import           Pos.Launcher.Param (BaseParams (..), LoggingParams (..), NodeParams (..))
 import           Pos.Lrc.Context (LrcContext (..), mkLrcSyncData)
 import           Pos.Network.Types (NetworkConfig (..))
 import           Pos.Reporting (initializeMisbehaviorMetrics)
 import           Pos.Shutdown.Types (ShutdownContext (..))
-import           Pos.Slotting (SlottingContextSum (..), mkNtpSlottingVar, mkSimpleSlottingVar)
+import           Pos.Slotting (SimpleSlottingStateVar, mkSimpleSlottingStateVar)
 import           Pos.Slotting.Types (SlottingData)
 import           Pos.Ssc (HasSscConfiguration, SscParams, SscState, createSscContext, mkSscState)
 import           Pos.StateLock (newStateLock)
@@ -94,17 +94,16 @@ allocateNodeResources
        ( Default ext
        , HasConfiguration
        , HasNodeConfiguration
-       , HasInfraConfiguration
        , HasSscConfiguration
        , HasDlgConfiguration
+       , HasBlockConfiguration
        )
-    => NetworkConfig KademliaParams
-    -> NodeParams
+    => NodeParams
     -> SscParams
     -> TxpGlobalSettings
     -> InitMode ()
     -> Production (NodeResources ext)
-allocateNodeResources networkConfig np@NodeParams {..} sscnp txpSettings initDB = do
+allocateNodeResources np@NodeParams {..} sscnp txpSettings initDB = do
     logInfo "Allocating node resources..."
     npDbPath <- case npDbPathM of
         Nothing -> do
@@ -139,7 +138,7 @@ allocateNodeResources networkConfig np@NodeParams {..} sscnp txpSettings initDB 
                 { ancdNodeParams = np
                 , ancdSscParams = sscnp
                 , ancdPutSlotting = putSlotting
-                , ancdNetworkCfg = networkConfig
+                , ancdNetworkCfg = npNetworkConfig
                 , ancdEkgStore = nrEkgStore
                 , ancdTxpMemState = txpVar
                 }
@@ -182,9 +181,9 @@ bracketNodeResources :: forall ext a.
       ( Default ext
       , HasConfiguration
       , HasNodeConfiguration
-      , HasInfraConfiguration
       , HasSscConfiguration
       , HasDlgConfiguration
+      , HasBlockConfiguration
       )
     => NodeParams
     -> SscParams
@@ -195,7 +194,7 @@ bracketNodeResources :: forall ext a.
 bracketNodeResources np sp txp initDB action = do
     let msg = "`NodeResources'"
     bracketWithLogging msg
-            (allocateNodeResources (npNetworkConfig np) np sp txp initDB)
+            (allocateNodeResources np sp txp initDB)
             releaseNodeResources $ \nodeRes ->do
         -- Notify systemd we are fully operative
         -- FIXME this is not the place to notify.
@@ -235,7 +234,7 @@ loggerBracket lp = bracket_ (setupLoggers lp) removeAllHandlers
 data AllocateNodeContextData ext = AllocateNodeContextData
     { ancdNodeParams  :: !NodeParams
     , ancdSscParams   :: !SscParams
-    , ancdPutSlotting :: (Timestamp, TVar SlottingData) -> SlottingContextSum -> InitMode ()
+    , ancdPutSlotting :: (Timestamp, TVar SlottingData) -> SimpleSlottingStateVar -> InitMode ()
     , ancdNetworkCfg  :: NetworkConfig KademliaParams
     , ancdEkgStore    :: !Metrics.Store
     , ancdTxpMemState :: !(GenericTxpLocalData ext)
@@ -243,7 +242,7 @@ data AllocateNodeContextData ext = AllocateNodeContextData
 
 allocateNodeContext
     :: forall ext .
-      (HasConfiguration, HasNodeConfiguration, HasInfraConfiguration)
+      (HasConfiguration, HasNodeConfiguration, HasBlockConfiguration)
     => AllocateNodeContextData ext
     -> TxpGlobalSettings
     -> Metrics.Store
@@ -267,10 +266,7 @@ allocateNodeContext ancd txpSettings ekgStore = do
     logDebug "Created LRC sync"
     ncSlottingVar <- (gdStartTime genesisData,) <$> mkSlottingVar
     logDebug "Created slotting variable"
-    ncSlottingContext <-
-        case npUseNTP of
-            True  -> SCNtp <$> mkNtpSlottingVar
-            False -> SCSimple <$> mkSimpleSlottingVar
+    ncSlottingContext <- mkSimpleSlottingStateVar
     logDebug "Created slotting context"
     putSlotting ncSlottingVar ncSlottingContext
     logDebug "Filled slotting future"

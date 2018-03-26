@@ -20,42 +20,38 @@ import           Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.List.NonEmpty as NE
 import qualified Data.Set as S
 import qualified Data.Text.Buildable as B
-import           Data.Time.Units (toMicroseconds)
--- TODO hopefully we can get rid of this import. It's needed for the
--- security workers stuff and peeking into some reader context which contains
--- it (part of WorkMode).
 import           Formatting (bprint, build, int, sformat, shown, stext, (%))
 import qualified Network.Broadcast.OutboundQueue as OQ
 import           Serokell.Util.Text (listJson)
 import           System.Wlog (logDebug, logWarning)
 
--- MsgGetHeaders Bi instance etc.
 import           Pos.Binary.Communication ()
+import           Pos.Block.Configuration (recoveryHeadersMessage)
 import           Pos.Block.Network (MsgBlock (..), MsgGetBlocks (..), MsgGetHeaders (..),
                                     MsgHeaders (..))
 import           Pos.Communication.Limits (HasAdoptedBlockVersionData, recvLimited)
 import           Pos.Communication.Listener (listenerConv)
 import           Pos.Communication.Message ()
 import           Pos.Communication.Protocol (Conversation (..), ConversationActions (..),
-                                             EnqueueMsg, MsgType (..), NodeId, Origin (..),
-                                             waitForConversations, OutSpecs, ListenerSpec,
-                                             MkListeners (..), constantListeners)
-import           Pos.Core (HeaderHash, headerHash, prevBlockL, bvdSlotDuration)
-import           Pos.Core.Block (Block, BlockHeader, MainBlockHeader, blockHeader)
+                                             EnqueueMsg, ListenerSpec, MkListeners (..),
+                                             MsgType (..), NodeId, Origin (..), OutSpecs,
+                                             constantListeners, waitForConversations)
+import           Pos.Core (HeaderHash, headerHash, prevBlockL)
+import           Pos.Core.Block (Block, BlockHeader (..), MainBlockHeader, blockHeader)
 import           Pos.Crypto (shortHashF)
 import           Pos.DB (DBError (DBMalformed))
 import           Pos.Diffusion.Full.Types (DiffusionWorkMode)
 import           Pos.Exception (cardanoExceptionFromException, cardanoExceptionToException)
-import           Pos.Logic.Types (GetBlockHeadersError (..), Logic (..))
+import           Pos.Logic.Types (Logic (..))
 import           Pos.Network.Types (Bucket)
 -- Dubious having this security stuff in here.
-import           Pos.Security.Params (AttackType (..), NodeAttackedError (..),
-                                      AttackTarget (..), SecurityParams (..))
+import           Pos.Security.Params (AttackTarget (..), AttackType (..), NodeAttackedError (..),
+                                      SecurityParams (..))
 import           Pos.Util (_neHead, _neLast)
-import           Pos.Util.Chrono (NewestFirst (..), _NewestFirst, OldestFirst (..),
-                                  NE, nonEmptyNewestFirst)
-import           Pos.Util.TimeWarp (nodeIdToAddress, NetworkAddress)
-import           Pos.Util.Timer (Timer, setTimerDuration, startTimer)
+import           Pos.Util.Chrono (NE, NewestFirst (..), OldestFirst (..), nonEmptyNewestFirst,
+                                  toOldestFirst, _NewestFirst, _OldestFirst)
+import           Pos.Util.DynamicTimer (DynamicTimer, startDynamicTimer)
+import           Pos.Util.TimeWarp (NetworkAddress, nodeIdToAddress)
 
 {-# ANN module ("HLint: ignore Reduce duplication" :: Text) #-}
 
@@ -123,10 +119,29 @@ getBlocks logic enqueue nodeId tipHeader checkpoints = do
     -- then you can skip requesting the headers and go straight to requesting
     -- the block itself.
     blocks <- if singleBlockHeader
-              then requestBlocks (NewestFirst (pure tipHeader))
-              else requestHeaders >>= requestBlocks
+              then requestBlocks (OldestFirst (one tipHeader))
+              else requestAndClassifyHeaders >>= requestBlocks
     pure (OldestFirst (reverse (toList blocks)))
   where
+
+    requestAndClassifyHeaders :: d (OldestFirst NE BlockHeader)
+    requestAndClassifyHeaders = do
+        headers <- toOldestFirst <$> requestHeaders
+        getLcaMainChain logic headers >>= \case
+            Nothing -> throwM $ DialogUnexpected $ "Got headers, but couldn't compute " <>
+                                                   "LCA to ask for blocks"
+            Just (lca :: HeaderHash) -> do
+                -- Headers list is (oldest to newest)
+                -- [n1,n2,...nj,lca,nj+2,...nk] we drop [n1..lca] and
+                -- return [nj+2..nk], as we already have lca in our
+                -- local db. Usually this function does 1 iterations
+                -- as it's a common case that [n1..nj] is absent and
+                -- lca is the oldest header.
+                let dropUntilLca = NE.dropWhile (\h -> h ^. prevBlockL /= lca)
+                case nonEmpty (dropUntilLca $ getOldestFirst headers) of
+                    Nothing -> throwM $ DialogUnexpected $
+                                   "All headers are older than LCA, nothing to query"
+                    Just headersSuffix -> pure (OldestFirst headersSuffix)
 
     singleBlockHeader :: Bool
     singleBlockHeader = case checkpoints of
@@ -187,22 +202,22 @@ getBlocks logic enqueue nodeId tipHeader checkpoints = do
                     nodeId
                 return headers
 
-    requestBlocks :: NewestFirst NE BlockHeader -> d (NewestFirst NE Block)
+    requestBlocks :: OldestFirst NE BlockHeader -> d (NewestFirst NE Block)
     requestBlocks headers = enqueueMsgSingle
         enqueue
         (MsgRequestBlocks (S.singleton nodeId))
         (Conversation $ requestBlocksConversation headers)
 
     requestBlocksConversation
-        :: NewestFirst NE BlockHeader
+        :: OldestFirst NE BlockHeader
         -> ConversationActions MsgGetBlocks MsgBlock d
         -> d (NewestFirst NE Block)
     requestBlocksConversation headers conv = do
         -- Preserved behaviour from existing logic code: all of the headers
         -- except for the first and last are tossed away.
         -- TODO don't be so wasteful [CSL-2148]
-        let oldestHeader = headers ^. _NewestFirst . _neLast
-            newestHeader = headers ^. _NewestFirst . _neHead
+        let oldestHeader = headers ^. _OldestFirst . _neHead
+            newestHeader = headers ^. _OldestFirst . _neLast
             numBlocks = length headers
             lcaChild = oldestHeader
             newestHash = headerHash newestHeader
@@ -320,7 +335,7 @@ announceBlockHeader logic enqueue header =  do
                 ("Announcing block"%shortHashF%" to "%build)
                 (headerHash header)
                 nodeId
-        send cA $ MsgHeaders (one (Right header))
+        send cA $ MsgHeaders (one (BlockHeaderMain header))
         -- After we announce, the peer is given an opportunity to request more
         -- headers within the same conversation.
         handleHeadersCommunication logic cA
@@ -338,7 +353,7 @@ handleHeadersCommunication
 handleHeadersCommunication logic conv = do
     whenJustM (recvLimited conv) $ \mgh@(MsgGetHeaders {..}) -> do
         logDebug $ sformat ("Got request on handleGetHeaders: "%build) mgh
-        -- FIXME 
+        -- FIXME
         -- Diffusion layer is entirely capable of serving blocks even if the
         -- logic layer is in recovery mode.
         ifM (recoveryInProgress logic) onRecovery $ do
@@ -354,11 +369,9 @@ handleHeadersCommunication logic conv = do
                 -- This is how a peer requests a chain of headers.
                 -- NB: if the limiting hash is Nothing, getBlockHeaders will
                 -- substitute our current tip.
-                (c1:cxs, _)   -> do
-                    headers <- getBlockHeaders logic (c1:|cxs) mghTo
-                    case headers of
-                        Left (GetBlockHeadersError txt) -> pure (Left txt)
-                        Right hs                        -> pure (Right hs)
+                (c1:cxs, _)   ->
+                    first show <$>
+                    getBlockHeaders logic (Just recoveryHeadersMessage) (c1:|cxs) mghTo
             either onNoHeaders handleSuccess headers
   where
     -- retrieves header of the newest main block if there's any,
@@ -396,7 +409,7 @@ blockListeners
        )
     => Logic m
     -> OQ.OutboundQ pack NodeId Bucket
-    -> Timer -- ^ Keepalive timer
+    -> DynamicTimer m -- ^ Keepalive timer
     -> MkListeners m
 blockListeners logic oq keepaliveTimer = constantListeners $
     [ -- Peer wants some block headers from us.
@@ -444,8 +457,8 @@ handleGetBlocks logic oq = listenerConv oq $ \__ourVerInfo nodeId conv -> do
         -- necessary: the streaming thing (probably a conduit) can determine
         -- whether the DB is malformed. Really, this listener has no business
         -- deciding that the database is malformed.
-        mHashes <- getBlockHeaders' logic mgbFrom mgbTo
-        case mHashes of
+        hashesM <- getHashesRange logic (Just recoveryHeadersMessage) mgbFrom mgbTo
+        case hashesM of
             Right hashes -> do
                 logDebug $ sformat
                     ("handleGetBlocks: started sending "%int%
@@ -453,19 +466,18 @@ handleGetBlocks logic oq = listenerConv oq $ \__ourVerInfo nodeId conv -> do
                     (length hashes) nodeId hashes
                 for_ hashes $ \hHash ->
                     getBlock logic hHash >>= \case
-                        Just b -> send conv $
-                            MsgBlock b
+                        Just b -> send conv $ MsgBlock b
                         Nothing  -> do
-                            send conv $
-                                MsgNoBlock ("Couldn't retrieve block with hash " <> pretty hHash)
+                            send conv $ MsgNoBlock ("Couldn't retrieve block with hash " <>
+                                                    pretty hHash)
                             failMalformed
                 logDebug "handleGetBlocks: blocks sending done"
-            _ -> logWarning $ "getBlocksByHeaders@retrieveHeaders returned Nothing"
+            Left e -> logWarning $ "getBlocksByHeaders@retrieveHeaders returned error: " <> show e
   where
     -- See note above in the definition of handleGetBlocks [CSL-2148].
     failMalformed =
         throwM $ DBMalformed $
-        "handleGetBlocks: getBlockHeaders' returned header that doesn't " <>
+        "handleGetBlocks: getHashesRange returned header that doesn't " <>
         "have corresponding block in storage."
 
 ----------------------------------------------------------------------------
@@ -480,9 +492,10 @@ handleBlockHeaders
        )
     => Logic m
     -> OQ.OutboundQ pack NodeId Bucket
-    -> Timer
+    -> DynamicTimer m
     -> (ListenerSpec m, OutSpecs)
-handleBlockHeaders logic oq keepaliveTimer = listenerConv @MsgGetHeaders oq $ \__ourVerInfo nodeId conv -> do
+handleBlockHeaders logic oq keepaliveTimer =
+  listenerConv @MsgGetHeaders oq $ \__ourVerInfo nodeId conv -> do
     -- The type of the messages we send is set to 'MsgGetHeaders' for
     -- protocol compatibility reasons only. We could use 'Void' here because
     -- we don't really send any messages.
@@ -491,10 +504,7 @@ handleBlockHeaders logic oq keepaliveTimer = listenerConv @MsgGetHeaders oq $ \_
     whenJust mHeaders $ \case
         (MsgHeaders headers) -> do
             -- Reset the keepalive timer.
-            -- slotDuration <- fromIntegral . toMicroseconds <$> getCurrentEpochSlotDuration
-            slotDuration <- fromIntegral . toMicroseconds . bvdSlotDuration <$> getAdoptedBVData logic
-            setTimerDuration keepaliveTimer $ 3 * slotDuration
-            startTimer keepaliveTimer
+            startDynamicTimer keepaliveTimer
             handleUnsolicitedHeaders logic (getNewestFirst headers) nodeId
         _ -> pass -- Why would somebody propagate 'MsgNoHeaders'? We don't care.
 

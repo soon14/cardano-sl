@@ -17,8 +17,9 @@ import qualified Text.JSON.Canonical as CanonicalJSON
 
 import           Pos.Client.KeyStorage (addSecretKey, getSecretKeysPlain)
 import           Pos.Client.Txp.Balances (getBalance)
-import           Pos.Core (AddrStakeDistribution (..), Address, SoftwareVersion (..), StakeholderId,
-                           addressHash, mkMultiKeyDistr, unsafeGetCoin)
+import           Pos.Core (AddrStakeDistribution (..), Address, HeavyDlgIndex (..),
+                           SoftwareVersion (..), StakeholderId, addressHash, mkMultiKeyDistr,
+                           unsafeGetCoin)
 import           Pos.Core.Common (AddrAttributes (..), AddrSpendingData (..), makeAddress)
 import           Pos.Core.Configuration (genesisSecretKeys)
 import           Pos.Core.Txp (TxOut (..))
@@ -41,8 +42,8 @@ import           Command.TyProjection (tyAddrDistrPart, tyAddrStakeDistr, tyAddr
                                        tyBool, tyByte, tyCoin, tyCoinPortion, tyEither,
                                        tyEpochIndex, tyFilePath, tyHash, tyInt,
                                        tyProposeUpdateSystem, tyPublicKey, tyScriptVersion,
-                                       tySecond, tySoftwareVersion, tyStakeholderId,
-                                       tySystemTag, tyTxOut, tyValue, tyWord, tyWord32)
+                                       tySecond, tySoftwareVersion, tyStakeholderId, tySystemTag,
+                                       tyTxOut, tyValue, tyWord, tyWord32)
 import qualified Command.Update as Update
 import           Lang.Argument (getArg, getArgMany, getArgOpt, getArgSome, typeDirectedKwAnn)
 import           Lang.Command (CommandProc (..), UnavailableCommand (..))
@@ -50,8 +51,7 @@ import           Lang.Name (Name)
 import           Lang.Value (AddKeyParams (..), AddrDistrPart (..), GenBlocksParams (..),
                              ProposeUpdateParams (..), ProposeUpdateSystem (..),
                              RollbackParams (..), Value (..))
-import           Mode (CmdCtx (..), MonadAuxxMode, deriveHDAddressAuxx, getCmdCtx,
-                       makePubKeyAddressAuxx)
+import           Mode (MonadAuxxMode, deriveHDAddressAuxx, makePubKeyAddressAuxx)
 import           Repl (PrintAction)
 
 createCommandProcs ::
@@ -370,7 +370,7 @@ createCommandProcs hasAuxxMode printAction mDiffusion = rights . fix $ \commands
         withSafeSigner issuerSk (pure emptyPassphrase) $ \case
             Nothing -> logError "Invalid passphrase"
             Just ss -> do
-                let psk = safeCreatePsk ss delegatePk curEpoch
+                let psk = safeCreatePsk ss delegatePk (HeavyDlgIndex curEpoch)
                 if dry
                 then do
                     printAction $
@@ -410,7 +410,6 @@ createCommandProcs hasAuxxMode printAction mDiffusion = rights . fix $ \commands
     , cpArgumentConsumer = getArgMany tyInt "i"
     , cpExec = \is -> do
         when (null is) $ logWarning "Not adding keys from pool (list is empty)"
-        CmdCtx {..} <- getCmdCtx
         let secrets = fromMaybe (error "Secret keys are unknown") genesisSecretKeys
         forM_ is $ \i -> do
             key <- evaluateNF $ secrets !! i
