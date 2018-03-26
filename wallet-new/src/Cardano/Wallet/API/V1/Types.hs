@@ -591,7 +591,7 @@ data WalletAddress = WalletAddress
   , addrBalance       :: !(V1 Core.Coin)
   , addrUsed          :: !Bool
   , addrChangeAddress :: !Bool
-  } deriving (Show, Eq, Generic)
+  } deriving (Show, Eq, Ord, Generic)
 
 deriveJSON Serokell.defaultOptions ''WalletAddress
 
