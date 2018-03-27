@@ -1,12 +1,12 @@
 -- | Restartable, STM-based dynamic timer build on top of `Pos.Util.Timer.Timer`.
 module Pos.Util.DynamicTimer
-  ( DynamicTimer(..)
+  ( DynamicTimer
   , newDynamicTimer
   , waitDynamicTimer
   , startDynamicTimer
   ) where
 
-import           Data.Time.Units (Microsecond)
+import           Data.Time.Units (Microsecond, toMicroseconds)
 import           Control.Concurrent.STM (readTVar, registerDelay, retry)
 import           Universum
 
@@ -30,6 +30,7 @@ waitDynamicTimer DynamicTimer{..} = do
 -- | Set the time duration of the underlying timer using the `dtDuration`
 -- action and start the underlying timer.
 startDynamicTimer :: MonadIO m => DynamicTimer m -> m ()
-startDynamicTimer DynamicTimer{..} = dtDuration
-  >>= liftIO . registerDelay . fromIntegral
+startDynamicTimer DynamicTimer{..} =
+      dtDuration
+  >>= liftIO . registerDelay . fromIntegral . toMicroseconds
   >>= atomically . writeTVar dtSemaphore
